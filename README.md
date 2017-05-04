@@ -5,10 +5,7 @@ A "collection" of tools for mangling audio content.
 ## Installation
 
 1. Clone the repository.
-1. Copy the auditools directory to a (not backuped) work directory.
-1. Open each script in your editor and check the user configurable pathes and options.
-1. Use the tools.
-1. Clean up the subdirectories.
+1. Open each script in your editor and check the user configurable settings.
 
 ## Platforms
 

@@ -1,10 +1,10 @@
-## `flac2m4a.sh`
+## flac2m4a.sh
 
 The `flac2m4a.sh` tool converts FLAC files in the `srcdir` into the AAC format
-and stores them to the `targetdir` directory.
+and stores them in the `targetdir` directory.
 
 The directory structure present in `srcdir` is preserved, i.e. it is possible
-to copy an artist directory (containing several albums) into `srcdir` and the
+to copy multiple artist directories (containing multiple albums) into `srcdir` and the
 `targetdir` will contain the same directory structure containing the M4A files.
 
 ### Motivation
@@ -15,28 +15,28 @@ with AAC are played fine on SYNC2.
 
 To copy new songs onto the USB stick used in the car, I basically do this:
 ```
-cd audiotools; ssh freenas01 "cd /path/to/artist; tar cf - album" | tar xf - -C srcdir; ./flac2m4a srcdir targetdir; mv targetdir/* /path/to/usbstick
+cd audiotools; ssh freenas01 "cd /path/to/artist; tar cf - album" | tar xf - -C srcdir && ./flac2m4a -s srcdir targetdir && mv targetdir/* /path/to/usbstick
 ```
 
 ### Usage
 ```
 ./flac2m4a.sh [-v] [-b cbr|vbr ] [-m] [-s] [-p] srcdir targetdir
  
--v means verbose, which will output the ffmpeg commands on stdout.
+-v means verbose, which will output the shell commands on stdout.
 
 -b toggles between constant and variable bitrate. Default is CBR.
 
 -m fixes the original metadata before it is added to the target file.
    The implemented code is just an example (for my real life problem).
-   See the script source.
+   See the script source for more information.
 
 -s fixes SYNC2's brain dead alphabetic play order to track order (Ford's SYNC2
-   ignores track numbers and plays the tracks sorted alphabetically by their name).
+   ignores track numbers and plays the tracks sorted alphabetically by their title).
    The only solution seems to be to prepend the track to the title, e.g.
    'Some Title' -> '03 Some Title'.
 
--p creates an m3u playlist named as the album in the album's directory. This is 
-   the second way to fix the SYNC2 behavior.
+-p creates an m3u playlist named as the album in the album's directory. Google says 
+   this will also fix the SYNC2 behavior.
 
 srcdir is the directory with the FLAC files.
 
@@ -55,7 +55,7 @@ You should update the configuration options in the script to meet your environme
 ```
 
 ### Known issues
-The example for the -f parameter described in the script is probably obsolete,
+The example for the -m parameter described in the script is probably obsolete,
 as ffmpeg in version git-2017-02-11-25d9cb4 detects the invalid ID3 tags already.
 
 When aborted (e.g. File exists. Overwrite? No) the tempdir is not cleaned up.

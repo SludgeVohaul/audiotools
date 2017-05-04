@@ -1,10 +1,10 @@
-## `audible2m4b.sh`
+## audible2m4b.sh
 
 The `audible2m4b.sh` tool converts Audible's AAX files in the `srcdir` into the 
-AAC format and stores them to the `targetdir` directory.
+AAC format and stores them in the `targetdir` directory.
 
 The directory structure present in `srcdir` is preserved, i.e. it is possible
-to copy a directory containing several audiobooks into `srcdir` and the
+to copy multiple directories containing with audiobooks into `srcdir` and the
 `targetdir` will contain the same directory structure containing the M4B files.
 
 ### Motivation
@@ -15,11 +15,11 @@ Just curiosity (and to see whether ffmpeg's -activation_bytes parameter really w
 ```
 ./audible2m4b.sh [-v] srcdir targetdir
  
--v means verbose, which will produce verbose output on stdout.
+-v means verbose, which will output the shell commands on stdout.
 
-srcdir is the directory holding the audible aax files.
+srcdir is the directory with the AAX files.
 
-targetdir is where the audiobook files will be written to.
+targetdir is the directory where the M4B files will be stored.
 ```
 
 ### Gotchas
@@ -27,11 +27,13 @@ You should update the configuration options in the script to meet your environme
 
 ### Example
 ```
-./audible2m4b.sh -v /the/srcdir "/the/target directory"   
+./audible2m4b.sh -v srcdir "/the/target directory"   
 ```
 
 ### Known issues
-None.
+When aborted (e.g. File exists. Overwrite? No) the tempdir is not cleaned up.
+
+Error handling is rather rare…
 
 ### Limitations
-It is an ugly hack.
+It is also an ugly hack.
