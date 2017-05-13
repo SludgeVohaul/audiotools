@@ -93,12 +93,20 @@ These are my observations:
 directory of the device (i.e. if you mount your USB stick in Windows under
 `X:\` then a playlist needs to be accessible through `X:\some_playlist.m3u`.
 The audio files can be located in subdirectories e.g. `X:\MyFiles\Ramones\...`.
-* The leading '\' in `\MyFiles\Ramones\...` is **not** optional.
+* Directory separators must be `\` (backslash) **not** `/` (slash).
+* The relative path must start with a `\`
 * Playlists located in an album's directory seem to break SYNC2's indexing
 process. If you have such playlists, audio files won't be indexed correctly
 (meaning not at all, even those in other directories).
 * The media player seems to handle `LF` as well as `CRLF` newlines (.i.e.
 playlists can be created under Windows as well as Unix-line OSes).
+* The album art is limited to 500x500px. Though I have successfully
+imported files with much higher resolutions into SYNC2, there were always a
+few files where the album art was not displayed. The technical parameters of
+the working and non working files were the same - the FLAC files have been
+created with the same parameters (CD rip), the M4A files too. Embedding the
+image from the working file into the other one did not work either.
+Only using album art with not more than 500x500px seems to work.
 
 ### Examples
 ```bash
