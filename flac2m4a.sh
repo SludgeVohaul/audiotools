@@ -4,13 +4,19 @@ set -u
 
 # Cannot use /bin/sh due to process substitution in run().
 
-VERSION="20170512"
+VERSION="20170517"
 
 # It seems to be impossible to add coverart to aac encoded streams in an MP4
 # container via ffmpeg. Therefore I use AtomicParsley.
 # If it is not present the coverart image will not be written to the output
 # file, but everything will be fine otherwise.
 ATOMICPARSLEY=/usr/local/bin/AtomicParsley
+
+# If AtomicParsley is not present ImageMagick is not necessary.
+# If you do have AtomicParsley, but not ImageMagick, do not use '-r'.
+IDENTIFY=/usr/local/bin/identify
+CONVERT=/usr/local/bin/convert
+
 FIND=/usr/bin/find
 MKDIR=/bin/mkdir
 RM=/bin/rm
@@ -18,6 +24,8 @@ SORT=/usr/bin/sort
 GREP=/usr/bin/grep
 SED=/usr/bin/sed
 PWD=/bin/pwd
+BASENAME=/usr/bin/basename
+
 # We need ffmpeg with fdk-aac. Install through homebrew with
 # brew install ffmpeg --HEAD --without-libvo-aacenc --without-qtkit --with-fdk-aac
 FFMPEG=/usr/local/bin/ffmpeg
@@ -26,7 +34,6 @@ FFMPEG_LOGGING_ARGS=( -loglevel warning )
 FFMPEG_ARGS=( -hide_banner -channel_layout stereo )
 FFPROBE=/usr/local/bin/ffprobe
 FFPROBE_LOGGING_ARGS=( -loglevel error )
-BASENAME=/usr/bin/basename
 
 # Constant bitrate encoding parameters:
 CBR=( "-b:a" "128k" )
@@ -39,11 +46,17 @@ ABS_TMP_DIR="${ABS_CURRENT_DIR}/tmpdir"
 ABS_TMP_AAC_FILE="${ABS_TMP_DIR}/audiofile.m4a"
 ABS_TMP_METADATA_FILE="${ABS_TMP_DIR}/metadata"
 ABS_TMP_COVERART_FILE="${ABS_TMP_DIR}/coverart"
+ABS_TMP_RESIZED_COVERART_FILE="${ABS_TMP_DIR}/resized_coverart"
 
-# On LogitechMediaServer I do not have the coverart embedded in each file,
+# On LogitechMediaServer I do not have the cover art embedded in each file,
 # I have one JPG inside the album's directory.
-# If a FLAC file does not have embedded coverart, this file will be used instead.
+# If a FLAC file does not have embedded cover art, use this file from the
+# same directory the FLAC files are located instead.
 ALBUM_COVERART_FILE="Front.jpg"
+
+# Resize cover art images so that either the width or height (which ever side 
+# is larger) have MAX_COVERART_PIXELS pixels.
+MAX_COVERART_PIXELS=500
 
 # This function is called when "-m" is used.
 # Background:
@@ -68,6 +81,7 @@ function fixMetadata()
 	########## Write your own metadata fixes here.##########
 	# Delete all characters between '=' and ';'.
 	logRun "${SED}" -i "" 's/=.*\\;/=/' "${ABS_TMP_METADATA_FILE}" 3
+	########################################################
 	log "Done." 3
 }
 
@@ -80,7 +94,7 @@ Version:
 '${VERSION}'
 
 Usage:
-'${PROGRAM}' [-v] [-b cbr|vbr ] [-m] [-t] [-p|q] [-j] [-x] srcdir targetdir
+'${PROGRAM}' [-v] [-b cbr|vbr] [-m] [-t] [-p|q] [-r] [-j] [-x] srcdir targetdir
 
 -v increases the verbosity level. A higher level means more output to stdout.
    Level 0: Warnings and errors only.
@@ -101,23 +115,22 @@ Usage:
 
 -p creates simple m3u playlists in targetdir named by the artist and album tags
    found in the converted files.
-   The playlists contain paths to all audio files with the same artist and
-   album tags, independent of the directory they are located in.
-   The paths to the converted audio files are be relative to the targetdir,
-   the directory separator is / (e.g. Ramones/Leave Home/07 Pinhead.m4a).
+   The directory separator is / (e.g. Ramones/Leave Home/07 Pinhead.m4a).
    Memory hook: p - the upper right side is \"heavier", the letter would buckle
    to the right: | -> /
    Cannot be used together with -q.
 
--q same as -p except the directory separator is \ and the paths also start
-   with \ (e.g. \Ramones\Leave Home\07 Pinhead.m4a)
+-q same as -p except for the directory separator being \ and the path starting
+   with \ (e.g. \Ramones\Leave Home\07 Pinhead.m4a).
    Such a playlist (an extended M3U playlist probably too) is the second way
    to fix the SYNC2 play order behaviour.
    Memory hook: q - the upper left side is "heavier" and would buckle to
    the left: | -> \
    Cannot be used together with -p.
 
--j writes a job summary to stdout.
+-r resizes cover art images to the value defined in the script if necessary.
+
+-j writes a job summary to stdout and exits.
 
 -x converts only 1s of each audiofile. This is intended for testing whether
    everything works as expected.
@@ -126,18 +139,8 @@ srcdir is the directory with the FLAC files.
 
 targetdir is the directory where the M4A files are created.
 
-EXAMPLES:
-'${PROGRAM}' -vvvpb vbr in out
-or
-'${PROGRAM}' -v -v -v -b vbr -p in out
 
-Result:
-- Logs error/warings, transcoded files, cover art, metadata, playlists,
-  executed commands.
-- Uses variable bitrate
-- Creates unix-style playlists
-- Searches for FLAC files in the '"'"'in'"'"' directory below the current directory.
-- Creates M4A files in the '"'"'out'"'"' directory below the current directory.
+Always use double quotes around names with spaces, or things won'"'"'t work.
 '
 }
 
@@ -158,11 +161,10 @@ function fixSync2()
 }
 
 # ----------------------------------------------------------------------------
-function addPlaylistItem()
+function addFileToPlaylist()
 {
 	local absTargetFile="$1"
 	local absTargetRootDir="$2"
-	local isDosStyle=$3
 
 	# The track value, e.g.: 02 -> 00002
 	local trackMetadataFormattedValue=$(printf "%05d" $(( 10#$("${GREP}" -i ^track "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
@@ -173,7 +175,7 @@ function addPlaylistItem()
 
 	# /a/b/c/targetdir/x/y/z/aa.m4a -> x/y/z/aa.m4a
 	local relTargetFile="${absTargetFile#${absTargetRootDir}/}"
-	if (( isDosStyle )); then
+	if (( CREATE_DOS_PLAYLIST )); then
 		# x/y/z/aa.m4a -> \x\y\z\aa.m4a
 		relTargetFile="\\${relTargetFile//\//\\}"
 	fi
@@ -225,29 +227,75 @@ function addMetadata()
 }
 
 # ----------------------------------------------------------------------------
-function addCoverArt()
+function processCoverart
 {
 	local absSrcFile="$1"
 	local absTargetFile="$2"
 
-	local absAlbumCoverartFile="${absSrcFile%/*}/${ALBUM_COVERART_FILE}"
-
-	if [ ! -f "${ATOMICPARSLEY}" ]; then
-		return
+	if (( RESIZE_COVER )); then
+		# Try to resize the embedded cover art first, 
+		# then the cover art file from the album's directory.
+		if [ -f "${ABS_TMP_COVERART_FILE}" ]; then
+			resizeCoverart "${ABS_TMP_COVERART_FILE}" "embedded"
+		elif [ -f "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" ]; then
+			resizeCoverart "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" "album"
+		fi
 	fi
 
-	if [ -f "${ABS_TMP_COVERART_FILE}" ]; then
-		log "Adding cover art..." 2
-		# Redirect stderr to stdout (the terminal), and then stdout
-		# to dev/null, i.e. write stderr to the terminal.
-		logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${ABS_TMP_COVERART_FILE}" --overWrite 3 2>&1 > /dev/null
-		log "Done." 3
-	elif [ -f "${absAlbumCoverartFile}" ]; then
-		log "Adding cover art..." 2
-		logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absAlbumCoverartFile}" --overWrite 3 2>&1 > /dev/null
-		log "Done." 3
+	# Try to embed the resized cover art file first,
+	# then the embedded cover art file,
+	# then the cover art file from the album's directory.
+	if [ -f "${ABS_TMP_RESIZED_COVERART_FILE}" ]; then
+		addCoverart "${absTargetFile}" "${ABS_TMP_RESIZED_COVERART_FILE}" "resized"
+	elif [ -f "${ABS_TMP_COVERART_FILE}" ]; then
+		addCoverart "${absTargetFile}" "${ABS_TMP_COVERART_FILE}" "embedded"
+	elif [ -f "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" ]; then
+		addCoverart "${absTargetFile}" "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" "album"
+	fi
+}
+
+# ----------------------------------------------------------------------------
+function addCoverart()
+{
+	local absTargetFile="$1"
+	local absEmbedableCoverartFile="$2"
+	local embedableCoverartType="$3"
+
+	# Redirect stderr to stdout (the terminal), and then stdout
+	# to dev/null, i.e. write stderr to the terminal.
+	log "Adding ${embedableCoverartType} cover art..." 2
+	logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absEmbedableCoverartFile}" --overWrite 3 2>&1 > /dev/null
+	log "Done." 3
+}
+
+# ----------------------------------------------------------------------------
+function resizeCoverart
+{
+	local absResizableCoverartFile="$1"
+	local resizableCoverartType="$2"
+
+	log "Reading cover art dimensions..." 2
+	local width=$(logRun "${IDENTIFY}" -ping -format '%w' "${absResizableCoverartFile}" 3)
+	local height=$(logRun "${IDENTIFY}" -ping -format '%h' "${absResizableCoverartFile}" 3)
+	log "Done." 3
+
+
+	if (( $width >= $height )); then
+		if (( $width > "${MAX_COVERART_PIXELS}" )); then
+			log "Resizing ${resizableCoverartType} cover art by width (${width}x${height} -> ${MAX_COVERART_PIXELS}x?)..." 2
+			logRun "${CONVERT}" "${absResizableCoverartFile}" -resize "${MAX_COVERART_PIXELS}x" "${ABS_TMP_RESIZED_COVERART_FILE}" 3
+			log "Done." 3
+		else
+			log "Resizing not necessary." 2
+		fi
 	else
-		log "Cover art not found for '${absSrcFile}'." 0 >&2
+		if (( $height > "${MAX_COVERART_PIXELS}" )); then
+			log "Resizing ${resizableCoverartType} cover art by height (${width}x${height} -> ?x${MAX_COVERART_PIXELS})..." 2
+			logRun "${CONVERT}" "${absResizableCoverartFile}" -resize "x${MAX_COVERART_PIXELS}" "${ABS_TMP_RESIZED_COVERART_FILE}" 3
+			log "Done." 3
+		else
+			log "Resizing not necessary." 2
+		fi
 	fi
 }
 
@@ -282,8 +330,8 @@ function doAAC()
 		ffmpegAllArgs+=( "${ffmpegAudioArgs[@]}" "${absTargetFile}" )
 	fi
 
-	# If there is a video stream in the source file, then it is the cover art.
-	# Add parameters to export it.
+	# If there is no video stream in the source file, use the album cover art
+	# file, otherwise use the video stream.
 	if [ ! -z "$("${FFPROBE}" "${FFPROBE_LOGGING_ARGS[@]}" -i "${absSrcFile}" -show_streams -select_streams v)" ]; then
 		ffmpegAllArgs+=( "${ffmpegCoverartArgs[@]}" "${ABS_TMP_COVERART_FILE}" )
 	fi
@@ -296,15 +344,16 @@ function doAAC()
 	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
 		if (( FIX_METADATA )); then fixMetadata; fi
 		if (( FIX_SYNC2 )); then fixSync2; fi
-		if (( CREATE_UNIX_PLAYLIST )); then addPlaylistItem "${absTargetFile}" "${absTargetRootDir}" $(( CREATE_DOS_PLAYLIST )); fi
-		if (( CREATE_DOS_PLAYLIST )); then addPlaylistItem "${absTargetFile}" "${absTargetRootDir}" $(( CREATE_DOS_PLAYLIST )); fi
+		if (( CREATE_UNIX_PLAYLIST )); then addFileToPlaylist "${absTargetFile}" "${absTargetRootDir}"; fi
+		if (( CREATE_DOS_PLAYLIST )); then addFileToPlaylist "${absTargetFile}" "${absTargetRootDir}"; fi
 		addMetadata "${absTargetFile}"
 	fi
 
-	addCoverArt "${absSrcFile}" "${absTargetFile}"
+	if [ -f "${ATOMICPARSLEY}" ]; then processCoverart "${absSrcFile}" "${absTargetFile}"; fi
 
 	log "Removing temporary files..." 2
 	removeAbsTempFile "${ABS_TMP_COVERART_FILE}"
+	removeAbsTempFile "${ABS_TMP_RESIZED_COVERART_FILE}"
 
 	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
 		removeAbsTempFile "${ABS_TMP_METADATA_FILE}"
@@ -329,17 +378,19 @@ function showJobSummary()
 			"$((( FIX_METADATA )) && echo "True" || echo "False")"
 			"$((( FIX_SYNC2 )) && echo "True" || echo "False")"
 			"${playlistType}"
+			"$((( RESIZE_COVER )) && echo "True" || echo "False")"
 			"${absTargetRootDir}")
 
 	printf "
 -----------------------------------------------------------------------
-I will transcode all *.flac files in the source directory to AAC.
+I would transcode all *.flac files in the source directory to AAC.
 
 Source directory   : '%s'
 Encoding parameters: '%s'
 Fix metadata       : %s
 Fix SYNC2          : %s
 Create playlist    : %s
+Resize cover art   : %s
 Target directory   : '%s'
 -----------------------------------------------------------------------\n" "${params[@]}"
 }
@@ -353,6 +404,7 @@ function run()
 
 	if (( JOB_SUMMARY )); then 
 		showJobSummary "${absSrcRootDir}" "${absTargetRootDir}"
+		exit
 	fi
 
 	local absSrcFile=""
@@ -395,10 +447,11 @@ FIX_METADATA=0
 FIX_SYNC2=0
 CREATE_UNIX_PLAYLIST=0
 CREATE_DOS_PLAYLIST=0
+RESIZE_COVER=0
 JOB_SUMMARY=0
 TEST_ONLY=0
 
-while getopts ":vb:mtpqjx" optname; do
+while getopts ":vb:mtpqjrx" optname; do
 	case "$optname" in
 	"v")
 		(( VERBOSITY++ ))
@@ -429,6 +482,13 @@ while getopts ":vb:mtpqjx" optname; do
 		if (( CREATE_DOS_PLAYLIST && CREATE_UNIX_PLAYLIST )); then
 			log "Cannot use -q together with -p" 0 >&2
 			exit 1
+		fi
+		;;
+	"r")
+		if [ -f "${IDENTIFY}" ] && [ -f "${CONVERT}" ]; then
+			RESIZE_COVER=1
+		else
+			log "Cannot use -r without ImageMagick" 0 >&2
 		fi
 		;;
 	"j")
