@@ -11,6 +11,8 @@ VERSION="20170517"
 # If it is not present the coverart image will not be written to the output
 # file, but everything will be fine otherwise.
 ATOMICPARSLEY=/usr/local/bin/AtomicParsley
+# See AtomicParsley --longhelp
+ATOMICPARSLEY_PIC_OPTIONS="DPI=72:removeTempPix"
 
 # If AtomicParsley is not present ImageMagick is not necessary.
 # If you do have AtomicParsley, but not ImageMagick, do not use '-r'.
@@ -20,20 +22,22 @@ CONVERT=/usr/local/bin/convert
 FIND=/usr/bin/find
 MKDIR=/bin/mkdir
 RM=/bin/rm
+CP=/bin/cp
 SORT=/usr/bin/sort
 GREP=/usr/bin/grep
 SED=/usr/bin/sed
 PWD=/bin/pwd
 BASENAME=/usr/bin/basename
+FILE=/usr/bin/file
 
 # We need ffmpeg with fdk-aac. Install through homebrew with
 # brew install ffmpeg --HEAD --without-libvo-aacenc --without-qtkit --with-fdk-aac
 FFMPEG=/usr/local/bin/ffmpeg
-FFMPEG_LOGGING_ARGS=( -loglevel warning )
-#FFMPEG_LOGGING_ARGS=( -loglevel info )
-FFMPEG_ARGS=( -hide_banner -channel_layout stereo )
+FFMPEG_LOGGING_ARGS=( "-loglevel" "warning" )
+#FFMPEG_LOGGING_ARGS=( "-loglevel" "info" )
+FFMPEG_BASE_ARGS=( "-hide_banner" )
 FFPROBE=/usr/local/bin/ffprobe
-FFPROBE_LOGGING_ARGS=( -loglevel error )
+FFPROBE_LOGGING_ARGS=( "-loglevel" "error" )
 
 # Constant bitrate encoding parameters:
 CBR=( "-b:a" "128k" )
@@ -45,8 +49,9 @@ ABS_TMP_DIR="${ABS_CURRENT_DIR}/tmpdir"
 
 ABS_TMP_AAC_FILE="${ABS_TMP_DIR}/audiofile.m4a"
 ABS_TMP_METADATA_FILE="${ABS_TMP_DIR}/metadata"
+# This is the base part of cover art file names.
+# The real file names will have an 5-digit index, i.e. 'coverart00010'.
 ABS_TMP_COVERART_FILE="${ABS_TMP_DIR}/coverart"
-ABS_TMP_RESIZED_COVERART_FILE="${ABS_TMP_DIR}/resized_coverart"
 
 # On LogitechMediaServer I do not have the cover art embedded in each file,
 # I have one JPG inside the album's directory.
@@ -55,8 +60,8 @@ ABS_TMP_RESIZED_COVERART_FILE="${ABS_TMP_DIR}/resized_coverart"
 ALBUM_COVERART_FILE="Front.jpg"
 
 # Resize cover art images so that either the width or height (which ever side 
-# is larger) have MAX_COVERART_PIXELS pixels.
-MAX_COVERART_PIXELS=500
+# is larger) have MAX_COVERART_DIMENSION pixels.
+MAX_COVERART_DIMENSION=500
 
 # This function is called when "-m" is used.
 # Background:
@@ -91,10 +96,10 @@ function usage()
 {
 	printf %s '
 Version:
-'${VERSION}'
+'"${VERSION}"'
 
 Usage:
-'${PROGRAM}' [-v] [-b cbr|vbr] [-m] [-t] [-p|q] [-r] [-j] [-x] srcdir targetdir
+'"${PROGRAM}"' [-v] [-b cbr|vbr] [-m] [-t] [-p|q] [-r] [-j] [-x] srcdir targetdir
 
 -v increases the verbosity level. A higher level means more output to stdout.
    Level 0: Warnings and errors only.
@@ -150,13 +155,15 @@ function fixSync2()
 	# The track value, e.g.: 02
 	# FYI - echo "08" | xargs printf "%02d" will not work as numbers with a leading 0 a regarded as octal!
 	# Convert it therefore to base 10 with (( ... ))
-	local trackMetadataFormattedValue=$(printf "%02d" $(( 10#$("${GREP}" -i ^track "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
+	local trackMetadataFormattedValue
+	trackMetadataFormattedValue=$(printf "%02d" $(( 10#$("${GREP}" -i ^track "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
 
 	# The title key, e.g.: TITLE
-	local titleMetadataKey=$("${GREP}" -io ^title "${ABS_TMP_METADATA_FILE}")
+	local titleMetadataKey
+	titleMetadataKey=$("${GREP}" -io ^title "${ABS_TMP_METADATA_FILE}")
 
 	log "Fixing SYNC2 issues..." 2
-	logRun "${SED}" -i "" s/"${titleMetadataKey}="/"${titleMetadataKey}=${trackMetadataFormattedValue} "/ "${ABS_TMP_METADATA_FILE}" 3
+	logRun "${SED}" -i "" "s/${titleMetadataKey}=/${titleMetadataKey}=${trackMetadataFormattedValue} /" "${ABS_TMP_METADATA_FILE}" 3
 	log "Done." 3
 }
 
@@ -167,14 +174,18 @@ function addFileToPlaylist()
 	local absTargetRootDir="$2"
 
 	# The track value, e.g.: 02 -> 00002
-	local trackMetadataFormattedValue=$(printf "%05d" $(( 10#$("${GREP}" -i ^track "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
+	local trackMetadataFormattedValue
+	trackMetadataFormattedValue=$(printf "%05d" $(( 10#$("${GREP}" -i ^track "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
 	# The album value
-	local albumMetadataValue=$("${GREP}" -i ^album "${ABS_TMP_METADATA_FILE}" | "${SED}" s/"^.*="//)
+	local albumMetadataValue
+	albumMetadataValue=$("${GREP}" -i ^album "${ABS_TMP_METADATA_FILE}" | "${SED}" s/"^.*="//)
 	# The artist value
-	local artistMetadataValue=$("${GREP}" -i ^artist "${ABS_TMP_METADATA_FILE}" | "${SED}" s/"^.*="//)
+	local artistMetadataValue
+	artistMetadataValue=$("${GREP}" -i ^artist "${ABS_TMP_METADATA_FILE}" | "${SED}" s/"^.*="//)
 
 	# /a/b/c/targetdir/x/y/z/aa.m4a -> x/y/z/aa.m4a
-	local relTargetFile="${absTargetFile#${absTargetRootDir}/}"
+	local relTargetFile
+	relTargetFile="${absTargetFile#${absTargetRootDir}/}"
 	if (( CREATE_DOS_PLAYLIST )); then
 		# x/y/z/aa.m4a -> \x\y\z\aa.m4a
 		relTargetFile="\\${relTargetFile//\//\\}"
@@ -204,7 +215,7 @@ function logRun()
 	local verbosityLevel="${commands[$(( ${#commands[@]} - 1 ))]}"
 
 	# Remove last element (the verbosity level) from the commands array.
-	unset "commands[$(( ${#commands[@]} - 1 ))]"
+	unset commands[$(( ${#commands[@]} - 1 ))]
 
 	if (( VERBOSITY >= verbosityLevel )); then
 		(set -x; "${commands[@]}")
@@ -218,11 +229,11 @@ function addMetadata()
 {
 	local absTargetFile="$1"
 
-	local ffmpegInputArgs=( -i "${ABS_TMP_AAC_FILE}" -i "${ABS_TMP_METADATA_FILE}" )
-	local ffmpegAudioArgs=( -map 0:a:0 -map_metadata 1 -c:0:a copy -flags +global_header -f mp4 )
+	local ffmpegInputArgs=( "-i" "${ABS_TMP_AAC_FILE}" "-i" "${ABS_TMP_METADATA_FILE}" )
+	local ffmpegAudioArgs=( "-map" "0:a:0" "-map_metadata" "1" "-c:0:a" "copy" "-flags" "+global_header" "-f" "mp4" )
 
 	log "Adding metadata..." 2
-	logRun "${FFMPEG}" "${FFMPEG_LOGGING_ARGS[@]}" "${ffmpegInputArgs[@]}" "${ffmpegAudioArgs[@]}" "${absTargetFile}" 3
+	logRun "${FFMPEG}" "${FFMPEG_LOGGING_ARGS[@]}" "${FFMPEG_BASE_ARGS[@]}" "${ffmpegInputArgs[@]}" "${ffmpegAudioArgs[@]}" "${absTargetFile}" 3
 	log "Done." 3
 }
 
@@ -231,72 +242,90 @@ function processCoverart
 {
 	local absSrcFile="$1"
 	local absTargetFile="$2"
+	
+	# Convert
+	PIC_OPTIONS="${ATOMICPARSLEY_PIC_OPTIONS}"
 
-	if (( RESIZE_COVER )); then
-		# Try to resize the embedded cover art first, 
-		# then the cover art file from the album's directory.
-		if [ -f "${ABS_TMP_COVERART_FILE}" ]; then
-			resizeCoverart "${ABS_TMP_COVERART_FILE}" "embedded"
-		elif [ -f "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" ]; then
-			resizeCoverart "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" "album"
+	if (( RESIZE_COVER )); then 
+		PIC_OPTIONS="${PIC_OPTIONS}:MaxDimensions=${MAX_COVERART_DIMENSION}"
+	fi
+
+	export PIC_OPTIONS
+
+	local existsEmbeddedCoverartFile=0
+
+	# Try to add the cover art file(s) embedded in the source file first.
+	while read -d '' -r -u3 absEmbeddedCoverartFile; do
+		addCoverart "${absTargetFile}" "${absEmbeddedCoverartFile}" "embedded"
+		existsEmbeddedCoverartFile=1
+	done 3< <("${FIND}" "${ABS_TMP_DIR}" -type f -maxdepth 1 -name "${ABS_TMP_COVERART_FILE##*/}"[0-9][0-9][0-9][0-9][0-9] -print0 | "${SORT}" -z)
+
+	# If there was no embedded cover art in the source file, try to add the 
+	# file from the album's directory.
+	if (( ! existsEmbeddedCoverartFile )); then
+		if [ -f "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" ]; then
+			addCoverart "${absTargetFile}" "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" "album"
+		else
+			log "Skipping cover art." 2
 		fi
 	fi
+}
 
-	# Try to embed the resized cover art file first,
-	# then the embedded cover art file,
-	# then the cover art file from the album's directory.
-	if [ -f "${ABS_TMP_RESIZED_COVERART_FILE}" ]; then
-		addCoverart "${absTargetFile}" "${ABS_TMP_RESIZED_COVERART_FILE}" "resized"
-	elif [ -f "${ABS_TMP_COVERART_FILE}" ]; then
-		addCoverart "${absTargetFile}" "${ABS_TMP_COVERART_FILE}" "embedded"
-	elif [ -f "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" ]; then
-		addCoverart "${absTargetFile}" "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" "album"
-	fi
+# ----------------------------------------------------------------------------
+function getFileExtension
+{
+	local absCoverartFile="$1"
+
+	log "+ Determining file extension..." 2
+	local fileExtensions
+	fileExtensions=$(logRun "${FILE}" -b --extension "${absCoverartFile}" 3)
+	log "+ Done." 3
+
+	# E.g. jpeg/jpg/jpe/jfif -> jpeg
+	# FYI: cannot use echo to return the value because of the log() calls.
+	# Therefore the value is written to a global variable '__' (could be as
+	# well called 'YADAYADAYADA')
+	__="${fileExtensions%%/*}"
 }
 
 # ----------------------------------------------------------------------------
 function addCoverart()
 {
 	local absTargetFile="$1"
-	local absEmbedableCoverartFile="$2"
-	local embedableCoverartType="$3"
+	local absSourceCoverartFile="$2"
+	local embeddableCoverartType="$3"
 
-	# Redirect stderr to stdout (the terminal), and then stdout
-	# to dev/null, i.e. write stderr to the terminal.
-	log "Adding ${embedableCoverartType} cover art..." 2
-	logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absEmbedableCoverartFile}" --overWrite 3 2>&1 > /dev/null
-	log "Done." 3
-}
+	log "Adding ${embeddableCoverartType} cover art..." 2
 
-# ----------------------------------------------------------------------------
-function resizeCoverart
-{
-	local absResizableCoverartFile="$1"
-	local resizableCoverartType="$2"
-
-	log "Reading cover art dimensions..." 2
-	local width=$(logRun "${IDENTIFY}" -ping -format '%w' "${absResizableCoverartFile}" 3)
-	local height=$(logRun "${IDENTIFY}" -ping -format '%h' "${absResizableCoverartFile}" 3)
-	log "Done." 3
-
-
-	if (( $width >= $height )); then
-		if (( $width > "${MAX_COVERART_PIXELS}" )); then
-			log "Resizing ${resizableCoverartType} cover art by width (${width}x${height} -> ${MAX_COVERART_PIXELS}x?)..." 2
-			logRun "${CONVERT}" "${absResizableCoverartFile}" -resize "${MAX_COVERART_PIXELS}x" "${ABS_TMP_RESIZED_COVERART_FILE}" 3
-			log "Done." 3
-		else
-			log "Resizing not necessary." 2
-		fi
+	# FYI: AtomicParsley (0.9.6) segfaults when adding cover art files that 
+	# need to be reencoded and do not have a file extension:
+	# 'AtomicParsley input.m4a --artwork file1 --overWrite' segfaults, while
+	# 'AtomicParsley input.m4a --artwork file1.asd --overWrite' works. ('asd'
+	# is not a placeholder - it seems as if just any extension is fine).
+	# Check if the cover art file has an extension (i.e. has a dot in the 
+	# basename) and if not, add the first extension 'file' suggests.
+	if [[ "${absSourceCoverartFile##*/}" != *.* ]]; then
+		getFileExtension "${absSourceCoverartFile}" && local fileExtension="${__}"
+		log "+ Adding file extension to cover art file..." 2
+		# /the/source/coverart -> /the/tempdir/coverart.XXX
+		local absTargetCoverartFile="${ABS_TMP_DIR}/${absSourceCoverartFile##*/}.${fileExtension}"
+		logRun "${CP}" -i "${absSourceCoverartFile}" "${absTargetCoverartFile}" 3
+		log "+ Done." 3
+		log "+ Embedding cover art..." 2 || 
+		logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absTargetCoverartFile}" --overWrite 3 2>&1 > /dev/null
+		log "+ Done." 3
+		log "+ Deleting temporary cover art file..." 2
+		removeAbsTempFile "${absTargetCoverartFile}"
+		log "+ Done." 3
 	else
-		if (( $height > "${MAX_COVERART_PIXELS}" )); then
-			log "Resizing ${resizableCoverartType} cover art by height (${width}x${height} -> ?x${MAX_COVERART_PIXELS})..." 2
-			logRun "${CONVERT}" "${absResizableCoverartFile}" -resize "x${MAX_COVERART_PIXELS}" "${ABS_TMP_RESIZED_COVERART_FILE}" 3
-			log "Done." 3
-		else
-			log "Resizing not necessary." 2
-		fi
+		# Redirect stderr to stdout (the terminal), and then stdout
+		# to dev/null, i.e. write stderr to the terminal.
+		log "+ Embedding cover art..." 2
+		logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absSourceCoverartFile}" --overWrite 3 2>&1 > /dev/null
+		log "+ Done." 3
 	fi
+
+	log "Done." 3
 }
 
 # ----------------------------------------------------------------------------
@@ -316,12 +345,13 @@ function doAAC()
 	local absTargetFile="$2"
 	local absTargetRootDir="$3"
 
-	local ffmpegInputArgs=( -i "${absSrcFile}" )
+	local ffmpegInputArgs=( "-i" "${absSrcFile}" )
 	# Encode 1s only.
-	if (( TEST_ONLY )); then ffmpegInputArgs=( -ss 00:00:00 -t 1 -i "${absSrcFile}" ); fi
-	local ffmpegAudioArgs=( -map 0:a:0 -c:0:a libfdk_aac ${ENCODING_PARAMS} -f mp4 )
-	local ffmpegMetadataArgs=( -f ffmetadata "${ABS_TMP_METADATA_FILE}" )
-	local ffmpegCoverartArgs=( -map 0:v:0 -c:0:v copy -vsync 2 -f image2 )
+	if (( TEST_ONLY )); then ffmpegInputArgs=( "-ss" "00:00:00" "-t" "1" "-i" "${absSrcFile}" ); fi
+	local ffmpegAudioArgs=( "-channel_layout" "stereo" "-map" "0:a:0" "-c:0:a" "libfdk_aac" "${ENCODING_PARAMS[@]}" "-f" "mp4" )
+	local ffmpegMetadataArgs=( "-f" "ffmetadata" "${ABS_TMP_METADATA_FILE}" )
+	# Export all video streams.
+	local ffmpegCoverartArgs=( "-map" "0:v" "-c:v" "copy" "-f" "image2" )
 	local ffmpegAllArgs=( "${ffmpegInputArgs[@]}" )
 
 	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
@@ -331,14 +361,15 @@ function doAAC()
 	fi
 
 	# If there is no video stream in the source file, use the album cover art
-	# file, otherwise use the video stream.
+	# file, otherwise use the files exported from the video streams.
+	# The exported files are called name00001, name00002, name00010, ...
 	if [ ! -z "$("${FFPROBE}" "${FFPROBE_LOGGING_ARGS[@]}" -i "${absSrcFile}" -show_streams -select_streams v)" ]; then
-		ffmpegAllArgs+=( "${ffmpegCoverartArgs[@]}" "${ABS_TMP_COVERART_FILE}" )
+		ffmpegAllArgs+=( "${ffmpegCoverartArgs[@]}" "${ABS_TMP_COVERART_FILE}%05d" )
 	fi
 
 	log "-----------------------------------------------------------------------" 2
 	log "Transcoding '${absSrcFile}'..." 1
-	logRun "${FFMPEG}" "${FFMPEG_LOGGING_ARGS[@]}" "${FFMPEG_ARGS[@]}" "${ffmpegAllArgs[@]}" 3
+	logRun "${FFMPEG}" "${FFMPEG_LOGGING_ARGS[@]}" "${FFMPEG_BASE_ARGS[@]}" "${ffmpegAllArgs[@]}" 3
 	log "Done." 3
 
 	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
@@ -353,7 +384,9 @@ function doAAC()
 
 	log "Removing temporary files..." 2
 	removeAbsTempFile "${ABS_TMP_COVERART_FILE}"
-	removeAbsTempFile "${ABS_TMP_RESIZED_COVERART_FILE}"
+	while read -d '' -r -u3 absEmbeddedCoverartFile; do
+		removeAbsTempFile "${absEmbeddedCoverartFile}"
+	done 3< <("${FIND}" "${ABS_TMP_DIR}" -type f -maxdepth 1 -name "${ABS_TMP_COVERART_FILE##*/}"[0-9][0-9][0-9][0-9][0-9] -print0 | "${SORT}" -z)
 
 	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
 		removeAbsTempFile "${ABS_TMP_METADATA_FILE}"
@@ -374,11 +407,11 @@ function showJobSummary()
 	
 	local params=(
 			"${absSrcRootDir}"
-			"${ENCODING_PARAMS}"
-			"$((( FIX_METADATA )) && echo "True" || echo "False")"
-			"$((( FIX_SYNC2 )) && echo "True" || echo "False")"
+			"${ENCODING_PARAMS[*]}"
+			"$( (( FIX_METADATA )) && echo "True" || echo "False" )"
+			"$( (( FIX_SYNC2 )) && echo "True" || echo "False" )"
 			"${playlistType}"
-			"$((( RESIZE_COVER )) && echo "True" || echo "False")"
+			"$( (( RESIZE_COVER )) && echo "True" || echo "False" )"
 			"${absTargetRootDir}")
 
 	printf "
@@ -407,8 +440,6 @@ function run()
 		exit
 	fi
 
-	local absSrcFile=""
-
 	while read -d '' -r -u3 absSrcFile; do
 		local absTargetFile="${absSrcFile/${absSrcRootDir}/${absTargetRootDir}}"
 		absTargetFile="${absTargetFile/.flac/.m4a}"
@@ -425,7 +456,6 @@ function run()
 
 	if (( CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
 		log "-----------------------------------------------------------------------" 2
-		local absTmpPlaylistFile=""
 		log "Creating playlist(s)..." 2
 		while read -d '' -r -u3 absTmpPlaylistFile; do
 			logRun "${SORT}" "${absTmpPlaylistFile}" -o "${absTmpPlaylistFile%.*}" 3
@@ -442,7 +472,7 @@ function run()
 PROGRAM=$(${BASENAME} "$0")
 
 VERBOSITY=0
-ENCODING_PARAMS="${CBR[@]}"
+ENCODING_PARAMS=( "${CBR[@]}" )
 FIX_METADATA=0
 FIX_SYNC2=0
 CREATE_UNIX_PLAYLIST=0
@@ -458,7 +488,7 @@ while getopts ":vb:mtpqjrx" optname; do
 		;;
 	"b")
 		if [ "$OPTARG" == "vbr" ]; then
-			ENCODING_PARAMS="${VBR[@]}"
+			ENCODING_PARAMS=( "${VBR[@]}" )
 		elif [ "$OPTARG" != "cbr" ] && [ "$OPTARG" != 'vbr' ]; then
 			log "Invalid parameter ${OPTARG}" 0 >&2
 			exit 1
