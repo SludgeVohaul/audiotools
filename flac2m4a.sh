@@ -14,11 +14,6 @@ ATOMICPARSLEY=/usr/local/bin/AtomicParsley
 # See AtomicParsley --longhelp
 ATOMICPARSLEY_PIC_OPTIONS="DPI=72:removeTempPix"
 
-# If AtomicParsley is not present ImageMagick is not necessary.
-# If you do have AtomicParsley, but not ImageMagick, do not use '-r'.
-IDENTIFY=/usr/local/bin/identify
-CONVERT=/usr/local/bin/convert
-
 FIND=/usr/bin/find
 MKDIR=/bin/mkdir
 RM=/bin/rm
@@ -515,10 +510,10 @@ while getopts ":vb:mtpqjrx" optname; do
 		fi
 		;;
 	"r")
-		if [ -f "${IDENTIFY}" ] && [ -f "${CONVERT}" ]; then
+		if [ -f "${ATOMICPARSLEY}" ]; then
 			RESIZE_COVER=1
 		else
-			log "Cannot use -r without ImageMagick" 0 >&2
+			log "Cannot use -r without AtomicParsley" 0 >&2
 		fi
 		;;
 	"j")
