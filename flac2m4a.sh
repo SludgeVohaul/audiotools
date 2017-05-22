@@ -4,7 +4,7 @@ set -u
 
 # Cannot use /bin/sh due to process substitution in run().
 
-VERSION="20170517"
+VERSION="20170522"
 
 # It seems to be impossible to add coverart to aac encoded streams in an MP4
 # container via ffmpeg. Therefore I use AtomicParsley.
@@ -237,15 +237,13 @@ function processCoverart
 {
 	local absSrcFile="$1"
 	local absTargetFile="$2"
-	
-	# Convert
+
+	export PIC_OPTIONS
 	PIC_OPTIONS="${ATOMICPARSLEY_PIC_OPTIONS}"
 
 	if (( RESIZE_COVER )); then 
 		PIC_OPTIONS="${PIC_OPTIONS}:MaxDimensions=${MAX_COVERART_DIMENSION}"
 	fi
-
-	export PIC_OPTIONS
 
 	local existsEmbeddedCoverartFile=0
 
@@ -306,7 +304,7 @@ function addCoverart()
 		local absTargetCoverartFile="${ABS_TMP_DIR}/${absSourceCoverartFile##*/}.${fileExtension}"
 		logRun "${CP}" -i "${absSourceCoverartFile}" "${absTargetCoverartFile}" 3
 		log "+ Done." 3
-		log "+ Embedding cover art..." 2 || 
+		log "+ Embedding cover art..." 2
 		logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absTargetCoverartFile}" --overWrite 3 2>&1 > /dev/null
 		log "+ Done." 3
 		log "+ Deleting temporary cover art file..." 2
