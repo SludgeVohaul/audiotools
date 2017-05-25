@@ -1,10 +1,10 @@
 ## flac2m4a.sh
 
 The `flac2m4a.sh` tool converts FLAC files in the `srcdir` into the AAC format
-and stores them in the `targetdir` directory.
+and stores them in a MP4 container in the `targetdir` directory.
 
-The directory structure present in `srcdir` (e.g multiple artist directories
-containing multiple album directories) is preserved in the `targetdir`.
+The directory structure in `srcdir` (e.g multiple artist directories
+containing multiple album directories) is preserved in `targetdir`.
 
 ### Motivation
 
@@ -57,7 +57,7 @@ ssh freenas01 "cd /path/to/the\ artist; tar cf - the\ album" | tar xf - -C /path
 
 -j writes a job summary to stdout and exists.
 
--x converts only one second of each audiofile. This is intended for testing
+-x processes only one second of each audiofile. This is intended for testing
    whether everything works as expected.
 
 srcdir is the directory with the FLAC files.
@@ -71,7 +71,7 @@ Always use double quotes around names with spaces, or things won't work.
 ### Playlists
 Playlists can be created with either the `-p` or `-q` parameter. Their naming
 schema is '`<artist tag> <album tag>.m3u`'.
-The playlists contain all audio files found in `srcdir` having identical 
+The playlists contain all audio files found in `srcdir` having identical
 artist and album tags.
 The paths to the audio files are relative to `targetdir`.
 
@@ -130,18 +130,18 @@ Only using cover art images with not more than 500x500px seems to work.
 
 ### Examples
 ```bash
-flac2m4a.sh -vvvprb vbr in out
+./flac2m4a.sh -vvvprb vbr relative/path/in /some/path/out
 ```
 
 or
 
 ```bash
-flac2m4a.sh -v -r -v -v -b vbr -p in out
+./flac2m4a.sh -v -r -v -v -b vbr -p relative/path/in /some/path/out
 ```
 
 Result:
 
-* Level 3 output (error/warnings, transcoded files, cover art, metadata,
+* Level 3 output (error/warnings, processed files, cover art, metadata,
   playlists, executed commands).
 * Uses variable bitrate
 * Creates unix-style playlists
@@ -149,8 +149,7 @@ Result:
   in source files) if either their width or height exceed the defined
   (in the script) max. number of pixels.
 * Searches for FLAC files in the `in` directory below the current directory.
-* Creates M4A files in the `out` directory below the current directory.
-
+* Creates M4A files in the `/some/path/out` directory.
 
 ### Known issues
 The example for the -m parameter described in the script is probably obsolete,
@@ -160,13 +159,16 @@ tags already.
 When aborted (e.g. File exists. Overwrite? No) the `tempdir` (and eventually
 the `*.m3u.tmp` files) are not cleaned up.
 
+Temporary files created by AtomicParsley are not deleted (yet).
+
 Error handling is rather rare...
 
 ### Limitations
 Function `logRun()` (used for logging the executed commands) will not log
-redirects (or pipes), should they ever be used.
+redirects (or pipes).
 
 If the cover art image from a file's source directory is to be used and
 needs to be resized (`-r` paramter), then it is resized for each file again,
-instead of resizing it only once for all files of the derectory.
+instead of resizing it only once for all files of the directory.
+
 All in all it is an ugly hack.
