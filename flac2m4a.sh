@@ -4,7 +4,7 @@ set -u
 
 # Cannot use /bin/sh due to process substitution in run().
 
-VERSION="20170522"
+VERSION="20170525"
 
 # It seems to be impossible to add coverart to aac encoded streams in an MP4
 # container via ffmpeg. Therefore I use AtomicParsley.
@@ -18,6 +18,7 @@ FIND=/usr/bin/find
 MKDIR=/bin/mkdir
 RM=/bin/rm
 CP=/bin/cp
+MV=/bin/mv
 SORT=/usr/bin/sort
 GREP=/usr/bin/grep
 SED=/usr/bin/sed
@@ -31,7 +32,9 @@ FFMPEG=/usr/local/bin/ffmpeg
 FFMPEG_LOGGING_ARGS=( "-loglevel" "warning" )
 #FFMPEG_LOGGING_ARGS=( "-loglevel" "info" )
 FFMPEG_BASE_ARGS=( "-hide_banner" )
+
 FFPROBE=/usr/local/bin/ffprobe
+FFPROBE_BASE_ARGS=( "-hide_banner" )
 FFPROBE_LOGGING_ARGS=( "-loglevel" "error" )
 
 # Constant bitrate encoding parameters:
@@ -39,6 +42,7 @@ CBR=( "-b:a" "128k" )
 # Variable bitrate encoding parameters:
 VBR=( "-vbr" "3" )
 
+# ######### TODO these values are not really user configurable right now #####
 ABS_CURRENT_DIR=$("${PWD}")
 ABS_TMP_DIR="${ABS_CURRENT_DIR}/tmpdir"
 
@@ -47,14 +51,16 @@ ABS_TMP_METADATA_FILE="${ABS_TMP_DIR}/metadata"
 # This is the base part of cover art file names.
 # The real file names will have an 5-digit index, i.e. 'coverart00010'.
 ABS_TMP_COVERART_FILE="${ABS_TMP_DIR}/coverart"
+# ############################################################################
 
 # On LogitechMediaServer I do not have the cover art embedded in each file,
 # I have one JPG inside the album's directory.
 # If a FLAC file does not have embedded cover art, use this file from the
 # same directory the FLAC files are located instead.
+# The value is just the file name without a path.
 ALBUM_COVERART_FILE="Front.jpg"
 
-# Resize cover art images so that either the width or height (which ever side 
+# Resize cover art images so that either the width or height (which ever side
 # is larger) have MAX_COVERART_DIMENSION pixels.
 MAX_COVERART_DIMENSION=500
 
@@ -99,8 +105,8 @@ Usage:
 -v increases the verbosity level. A higher level means more output to stdout.
    Level 0: Warnings and errors only.
    Level 1: Transcoded files.
-   LeveL 2: Processing of cover art, metadata, playlists, temp file deletions
-   Level 3: Executed commands
+   LeveL 2: Processing of cover art, metadata, playlists, temp file deletions.
+   Level 3: Executed commands.
 
 -b toggles between constant and variable bitrate. Default is CBR.
 
@@ -132,7 +138,7 @@ Usage:
 
 -j writes a job summary to stdout and exits.
 
--x converts only 1s of each audiofile. This is intended for testing whether
+-x processes only 1s of each audiofile. This is intended for testing whether
    everything works as expected.
 
 srcdir is the directory with the FLAC files.
@@ -147,7 +153,7 @@ Always use double quotes around names with spaces, or things won'"'"'t work.
 # ----------------------------------------------------------------------------
 function fixSync2()
 {
-	# The track value, e.g.: 02
+	# The track value, e.g.: 02 -> 00002
 	# FYI - echo "08" | xargs printf "%02d" will not work as numbers with a leading 0 a regarded as octal!
 	# Convert it therefore to base 10 with (( ... ))
 	local trackMetadataFormattedValue
@@ -169,6 +175,8 @@ function addFileToPlaylist()
 	local absTargetRootDir="$2"
 
 	# The track value, e.g.: 02 -> 00002
+	# FYI - echo "08" | xargs printf "%02d" will not work as numbers with a leading 0 a regarded as octal!
+	# Convert it therefore to base 10 with (( ... ))
 	local trackMetadataFormattedValue
 	trackMetadataFormattedValue=$(printf "%05d" $(( 10#$("${GREP}" -i ^track "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
 	# The album value
@@ -187,7 +195,11 @@ function addFileToPlaylist()
 	fi
 
 	# 00010###x/y/z/aa.m4a >> /a/b/c/targetdir/<titletag>.m3u.tmp
-	echo "${trackMetadataFormattedValue}###${relTargetFile}" >> "${absTargetRootDir}/${artistMetadataValue} ${albumMetadataValue}.m3u.tmp"
+	local tmpPlaylistEntry="${trackMetadataFormattedValue}###${relTargetFile}"
+	log "Creating temporary playlist entry..." 2
+	log "${tmpPlaylistEntry}" 3
+	echo "${tmpPlaylistEntry}" >> "${absTargetRootDir}/${artistMetadataValue} ${albumMetadataValue}.m3u.tmp"
+	log "Done." 3
 }
 
 # ----------------------------------------------------------------------------
@@ -233,7 +245,30 @@ function addMetadata()
 }
 
 # ----------------------------------------------------------------------------
-function processCoverart
+function hasEmbeddedCoverart()
+{
+	local absSrcFile="$1"
+
+	local ffprobeInputArgs=( "-i" "${absSrcFile}" )
+	local ffprobeDataArgs=( "-show_streams" "-select_streams" "v" )
+
+	local ffprobeAllArgs=(
+		"${FFPROBE_LOGGING_ARGS[@]}"
+		"${FFPROBE_BASE_ARGS[@]}"
+		"${ffprobeInputArgs[@]}"
+		"${ffprobeDataArgs[@]}")
+
+	# Check if the source file has an video stream.
+	if [ -z "$("${FFPROBE}" "${ffprobeAllArgs[@]}" )" ]; then
+		echo 0
+	else
+		echo 1
+	fi
+}
+
+# ----------------------------------------------------------------------------
+
+function processCoverart()
 {
 	local absSrcFile="$1"
 	local absTargetFile="$2"
@@ -241,7 +276,7 @@ function processCoverart
 	export PIC_OPTIONS
 	PIC_OPTIONS="${ATOMICPARSLEY_PIC_OPTIONS}"
 
-	if (( RESIZE_COVER )); then 
+	if (( RESIZE_COVER )); then
 		PIC_OPTIONS="${PIC_OPTIONS}:MaxDimensions=${MAX_COVERART_DIMENSION}"
 	fi
 
@@ -253,11 +288,14 @@ function processCoverart
 		existsEmbeddedCoverartFile=1
 	done 3< <("${FIND}" "${ABS_TMP_DIR}" -type f -maxdepth 1 -name "${ABS_TMP_COVERART_FILE##*/}"[0-9][0-9][0-9][0-9][0-9] -print0 | "${SORT}" -z)
 
-	# If there was no embedded cover art in the source file, try to add the 
-	# file from the album's directory.
+	# If there was no embedded cover art in the source file, try to add a copy
+	# of the file from the album's directory.
 	if (( ! existsEmbeddedCoverartFile )); then
 		if [ -f "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" ]; then
-			addCoverart "${absTargetFile}" "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" "album"
+			log "Creating working copy of the album cover art file..." 2
+			logRun "${CP}" -i "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" "${ABS_TMP_DIR}/${ALBUM_COVERART_FILE}" 3
+			log "Done." 3
+			addCoverart "${absTargetFile}" "${ABS_TMP_DIR}/${ALBUM_COVERART_FILE}" "album"
 		else
 			log "Skipping cover art." 2
 		fi
@@ -265,7 +303,7 @@ function processCoverart
 }
 
 # ----------------------------------------------------------------------------
-function getFileExtension
+function getFileExtension()
 {
 	local absCoverartFile="$1"
 
@@ -282,6 +320,18 @@ function getFileExtension
 }
 
 # ----------------------------------------------------------------------------
+function addFileExension()
+{
+	local absSourceCoverartFile="$1"
+	local fileExtension="$2"
+
+	log "+ Adding extension '${fileExtension}' to cover art file..." 2
+	# /some/path/<name> -> /some/path/<name>.XXX
+	logRun "${MV}" "${absSourceCoverartFile}" "${absSourceCoverartFile}.${fileExtension}" 3
+	log "+ Done." 3
+}
+
+# ----------------------------------------------------------------------------
 function addCoverart()
 {
 	local absTargetFile="$1"
@@ -290,44 +340,58 @@ function addCoverart()
 
 	log "Adding ${embeddableCoverartType} cover art..." 2
 
-	# FYI: AtomicParsley (0.9.6) segfaults when adding cover art files that 
+	# FYI: AtomicParsley (0.9.6) segfaults when adding cover art files that
 	# need to be reencoded and do not have a file extension:
 	# 'AtomicParsley input.m4a --artwork file1 --overWrite' segfaults, while
-	# 'AtomicParsley input.m4a --artwork file1.asd --overWrite' works. ('asd'
-	# is not a placeholder - it seems as if just any extension is fine).
-	# Check if the cover art file has an extension (i.e. has a dot in the 
-	# basename) and if not, add the first extension 'file' suggests.
-	if [[ "${absSourceCoverartFile##*/}" != *.* ]]; then
-		getFileExtension "${absSourceCoverartFile}" && local fileExtension="${__}"
-		log "+ Adding file extension to cover art file..." 2
-		# /the/source/coverart -> /the/tempdir/coverart.XXX
-		local absTargetCoverartFile="${ABS_TMP_DIR}/${absSourceCoverartFile##*/}.${fileExtension}"
-		logRun "${CP}" -i "${absSourceCoverartFile}" "${absTargetCoverartFile}" 3
-		log "+ Done." 3
-		log "+ Embedding cover art..." 2
-		logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absTargetCoverartFile}" --overWrite 3 2>&1 > /dev/null
-		log "+ Done." 3
-		log "+ Deleting temporary cover art file..." 2
-		removeAbsTempFile "${absTargetCoverartFile}"
-		log "+ Done." 3
+	# 'AtomicParsley input.m4a --artwork file1.asd --overWrite' works.
+	# 'asd' is not a placeholder - it seems as if any any extension was fine.
+
+	local absSourceCoverartFileWithExtension
+	# Check if cover art file has an extension (i.e. a dot in the basename).
+	if [[ "${absSourceCoverartFile##*/}" == *.* ]]; then
+		absSourceCoverartFileWithExtension="${absSourceCoverartFile}"
 	else
-		# Redirect stderr to stdout (the terminal), and then stdout
-		# to dev/null, i.e. write stderr to the terminal.
-		log "+ Embedding cover art..." 2
-		logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absSourceCoverartFile}" --overWrite 3 2>&1 > /dev/null
-		log "+ Done." 3
+		# Get the first extension 'file' suggests.
+		getFileExtension "${absSourceCoverartFile}" && local fileExtension="${__}"
+		addFileExension "${absSourceCoverartFile}" "${fileExtension}"
+		absSourceCoverartFileWithExtension="${absSourceCoverartFile}.${fileExtension}"
 	fi
+
+	log "+ Embedding cover art file..." 2
+	logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absSourceCoverartFileWithExtension}" --overWrite 3 2>&1 > /dev/null
+	log "+ Done." 3
+
+	log "+ Deleting temporary cover art file..." 2
+	removeAbsFile "${absSourceCoverartFileWithExtension}"
+	log "+ Done." 3
 
 	log "Done." 3
 }
 
 # ----------------------------------------------------------------------------
-function removeAbsTempFile()
+function removeAbsFile()
 {
-	local absTempFile="$1"
+	local absFile="$1"
 
-	if [ -f "${absTempFile}" ]; then
-		logRun "${RM}" -f "${absTempFile}" 3
+	if [ -f "${absFile}" ]; then
+		logRun "${RM}" "${absFile}" 3
+	fi
+}
+
+# ----------------------------------------------------------------------------
+function createPlaylists()
+{
+	local absTargetRootDir="$1"
+
+	if (( CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
+		log "-----------------------------------------------------------------------" 2
+		log "Creating playlist(s)..." 2
+		while read -d '' -r -u3 absTmpPlaylistFile; do
+			logRun "${SORT}" "${absTmpPlaylistFile}" -o "${absTmpPlaylistFile%.*}" 3
+			logRun "${SED}" -i "" s/"^[0-9]*###"// "${absTmpPlaylistFile%.*}" 3
+			removeAbsFile  "${absTmpPlaylistFile}"
+		done 3< <("${FIND}" "${absTargetRootDir}" -type f -name \*.m3u.tmp -print0)
+		log "Done." 3
 	fi
 }
 
@@ -340,52 +404,64 @@ function doAAC()
 
 	local ffmpegInputArgs=( "-i" "${absSrcFile}" )
 	# Encode 1s only.
-	if (( TEST_ONLY )); then ffmpegInputArgs=( "-ss" "00:00:00" "-t" "1" "-i" "${absSrcFile}" ); fi
+	local ffmpegTestArgs=( "-ss" "00:00:00" "-t" "1" )
 	local ffmpegAudioArgs=( "-channel_layout" "stereo" "-map" "0:a:0" "-c:0:a" "libfdk_aac" "${ENCODING_PARAMS[@]}" "-f" "mp4" )
+	# Export the file's metadata.
 	local ffmpegMetadataArgs=( "-f" "ffmetadata" "${ABS_TMP_METADATA_FILE}" )
 	# Export all video streams.
 	local ffmpegCoverartArgs=( "-map" "0:v" "-c:v" "copy" "-f" "image2" )
-	local ffmpegAllArgs=( "${ffmpegInputArgs[@]}" )
+
+	local ffmpegAllArgs=( "${FFMPEG_LOGGING_ARGS[@]}" "${FFMPEG_BASE_ARGS[@]}" )
+
+	# FYI: This needs to be ahead of the ffmpegInputArgs.
+	if (( TEST_ONLY )); then ffmpegAllArgs+=( "${ffmpegTestArgs[@]}" ); fi
+
+	ffmpegAllArgs+=( "${ffmpegInputArgs[@]}" )
 
 	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
-		ffmpegAllArgs+=( "${ffmpegMetadataArgs[@]}" "${ffmpegAudioArgs[@]}" "${ABS_TMP_AAC_FILE}" )
-	else
-		ffmpegAllArgs+=( "${ffmpegAudioArgs[@]}" "${absTargetFile}" )
+		ffmpegAllArgs+=( "${ffmpegMetadataArgs[@]}" )
 	fi
 
-	# If there is no video stream in the source file, use the album cover art
-	# file, otherwise use the files exported from the video streams.
-	# The exported files are called name00001, name00002, name00010, ...
-	if [ ! -z "$("${FFPROBE}" "${FFPROBE_LOGGING_ARGS[@]}" -i "${absSrcFile}" -show_streams -select_streams v)" ]; then
-		ffmpegAllArgs+=( "${ffmpegCoverartArgs[@]}" "${ABS_TMP_COVERART_FILE}%05d" )
+	ffmpegAllArgs+=( "${ffmpegAudioArgs[@]}" )
+
+	if (( FIX_METADATA || FIX_SYNC2 )); then
+		ffmpegAllArgs+=( "${ABS_TMP_AAC_FILE}" )
+	else
+		ffmpegAllArgs+=( "${absTargetFile}" )
+	fi
+
+	if [ -f "${ATOMICPARSLEY}" ]; then
+		if (( $(hasEmbeddedCoverart "${absSrcFile}") )); then
+			# Export files from video stream. Names will be <name>00001, <name>00002, <name>00010, ...
+			ffmpegAllArgs+=( "${ffmpegCoverartArgs[@]}" "${ABS_TMP_COVERART_FILE}%05d" )
+		fi
 	fi
 
 	log "-----------------------------------------------------------------------" 2
 	log "Transcoding '${absSrcFile}'..." 1
-	logRun "${FFMPEG}" "${FFMPEG_LOGGING_ARGS[@]}" "${FFMPEG_BASE_ARGS[@]}" "${ffmpegAllArgs[@]}" 3
+	logRun "${FFMPEG}" "${ffmpegAllArgs[@]}" 3
 	log "Done." 3
 
-	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
+	if (( FIX_METADATA || FIX_SYNC2 )); then
 		if (( FIX_METADATA )); then fixMetadata; fi
 		if (( FIX_SYNC2 )); then fixSync2; fi
-		if (( CREATE_UNIX_PLAYLIST )); then addFileToPlaylist "${absTargetFile}" "${absTargetRootDir}"; fi
-		if (( CREATE_DOS_PLAYLIST )); then addFileToPlaylist "${absTargetFile}" "${absTargetRootDir}"; fi
 		addMetadata "${absTargetFile}"
+		log "Deleting temporary AAC file..." 2
+		removeAbsFile "${ABS_TMP_AAC_FILE}"
+		log "Done." 3
+	fi
+
+	if (( CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
+		addFileToPlaylist "${absTargetFile}" "${absTargetRootDir}"
+	fi
+
+	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
+		log "Deleting temporary metadata file..." 2
+		removeAbsFile "${ABS_TMP_METADATA_FILE}"
+		log "Done." 3
 	fi
 
 	if [ -f "${ATOMICPARSLEY}" ]; then processCoverart "${absSrcFile}" "${absTargetFile}"; fi
-
-	log "Removing temporary files..." 2
-	removeAbsTempFile "${ABS_TMP_COVERART_FILE}"
-	while read -d '' -r -u3 absEmbeddedCoverartFile; do
-		removeAbsTempFile "${absEmbeddedCoverartFile}"
-	done 3< <("${FIND}" "${ABS_TMP_DIR}" -type f -maxdepth 1 -name "${ABS_TMP_COVERART_FILE##*/}"[0-9][0-9][0-9][0-9][0-9] -print0 | "${SORT}" -z)
-
-	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
-		removeAbsTempFile "${ABS_TMP_METADATA_FILE}"
-		removeAbsTempFile "${ABS_TMP_AAC_FILE}"
-	fi
-	log "Done." 3
 }
 
 # ----------------------------------------------------------------------------
@@ -393,11 +469,11 @@ function showJobSummary()
 {
 	local absSrcRootDir="$1"
 	local absTargetRootDir="$2"
-	
+
 	local playlistType="False"
 	if (( CREATE_UNIX_PLAYLIST )); then playlistType="With '/' separators"; fi
 	if (( CREATE_DOS_PLAYLIST )); then playlistType="With '\\' separators"; fi
-	
+
 	local params=(
 			"${absSrcRootDir}"
 			"${ENCODING_PARAMS[*]}"
@@ -405,6 +481,7 @@ function showJobSummary()
 			"$( (( FIX_SYNC2 )) && echo "True" || echo "False" )"
 			"${playlistType}"
 			"$( (( RESIZE_COVER )) && echo "True" || echo "False" )"
+			"$( (( TEST_ONLY )) && echo "True" || echo "False" )"
 			"${absTargetRootDir}")
 
 	printf "
@@ -417,8 +494,10 @@ Fix metadata       : %s
 Fix SYNC2          : %s
 Create playlist    : %s
 Resize cover art   : %s
+Only 1s            : %s
 Target directory   : '%s'
------------------------------------------------------------------------\n" "${params[@]}"
+-----------------------------------------------------------------------
+" "${params[@]}"
 }
 
 # ----------------------------------------------------------------------------
@@ -427,8 +506,11 @@ function run()
 	local absSrcRootDir="$1"
 	local absTargetRootDir="$2"
 
+	if [ ! -f "${ATOMICPARSLEY}" ]; then
+		log "AtomicParsley not found. Cover art will not be processed." 0
+	fi
 
-	if (( JOB_SUMMARY )); then 
+	if (( JOB_SUMMARY )); then
 		showJobSummary "${absSrcRootDir}" "${absTargetRootDir}"
 		exit
 	fi
@@ -447,16 +529,7 @@ function run()
 		doAAC "${absSrcFile}" "${absTargetFile}" "${absTargetRootDir}"
 	done 3< <("${FIND}" "${absSrcRootDir}" -type f -name \*.flac -print0 | "${SORT}" -z)
 
-	if (( CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
-		log "-----------------------------------------------------------------------" 2
-		log "Creating playlist(s)..." 2
-		while read -d '' -r -u3 absTmpPlaylistFile; do
-			logRun "${SORT}" "${absTmpPlaylistFile}" -o "${absTmpPlaylistFile%.*}" 3
-			logRun "${SED}" -i "" s/"^[0-9]*###"// "${absTmpPlaylistFile%.*}" 3
-			removeAbsTempFile  "${absTmpPlaylistFile}"
-		done 3< <("${FIND}" "${absTargetRootDir}" -type f -name \*.m3u.tmp -print0)
-		log "Done." 3
-	fi
+	createPlaylists "${absTargetRootDir}"
 }
 
 # ----------------------------------------------------------------------------
