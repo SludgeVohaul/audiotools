@@ -1,7 +1,7 @@
 ## flac2m4a.sh
 
-The `flac2m4a.sh` tool converts FLAC files in the `srcdir` into the AAC format
-and stores them in a MP4 container in the `targetdir` directory.
+The `flac2m4a.sh` tool converts FLAC files in `srcdir` into the AAC format
+and stores them in a MP4 container in `targetdir`.
 
 The directory structure in `srcdir` (e.g multiple artist directories
 containing multiple album directories) is preserved in `targetdir`.
@@ -39,7 +39,7 @@ ssh freenas01 "cd /path/to/the\ artist; tar cf - the\ album" | tar xf - -C /path
    adding the track number to the title tag ('Some Title' -> '03 Some Title').
 
 -p creates simple m3u playlists in targetdir named by the artist and album tags
-   found in the converted files.
+   found in the source files.
    The directory separator is / (e.g. Ramones/Leave Home/07 Pinhead.m4a).
    Memory hook: p - the upper right side is "heavier", the letter would buckle
    to the right: | -> /
@@ -119,7 +119,7 @@ The audio files can be located in subdirectories e.g. `X:\My Music\Ramones\...`.
 process. If you have such playlists, audio files won't be indexed correctly
 (meaning not at all, even those in other directories).
 * The media player seems to handle `LF` as well as `CRLF` newlines (.i.e.
-playlists can be created under Windows as well as Unix-line OSes).
+playlists can be created under Windows as well as Unix-like OSes).
 * The cover art is limited to 500x500px. Though I have successfully
 imported files with much higher resolutions into SYNC2, there were always a
 few files where the cover art was not displayed. The technical parameters of
@@ -164,6 +164,10 @@ Temporary files created by AtomicParsley are not deleted (yet).
 Error handling is rather rare...
 
 ### Limitations
+Encoding of gapless songs results in a gap. It seems to be not possible with
+`ffmpeg` and the `libfdk_aac` AAC library (as I have not found a way to 
+create the `iTunSMPB` tag).
+
 Function `logRun()` (used for logging the executed commands) will not log
 redirects (or pipes).
 
