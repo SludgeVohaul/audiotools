@@ -19,7 +19,7 @@ ssh freenas01 "cd /path/to/the\ artist; tar cf - the\ album" | tar xf - -C /path
 
 ### Usage
 ```
-./flac2m4a.sh [-v] [-b cbr|vbr ] [-m] [-t] [-p|q] [-r] [-j] [-x] srcdir targetdir
+./flac2m4a.sh [-v] [-b cbr|vbr ] [-m] [-t] [-g] [-p|q] [-r] [-j] [-x] srcdir targetdir
 
 -v increases the verbosity level. A higher level means more output to stdout.
    Level 0: Warnings and errors only.
@@ -37,6 +37,8 @@ ssh freenas01 "cd /path/to/the\ artist; tar cf - the\ album" | tar xf - -C /path
    alphabetically by their title tag.
    The switch fixes SYNC2's brain dead alphabetic play order to track order by
    adding the track number to the title tag ('Some Title' -> '03 Some Title').
+
+-g gapless mode - creates pgag and iTunSMPB in the converted file.
 
 -p creates simple m3u playlists in targetdir named by the artist and album tags
    found in the source files.
@@ -96,8 +98,11 @@ these two conditions is met:
 The FLAC files should be tagged. Untagged files may lead to undesired results
 when creating playlists.
 
-Creating playlists with `-p` or `-q` might fail as the title tags might contain
-characters which cannot be used in filenames.
+Creating playlists with `-p` or `-q` might fail as the values in the `TITLE`
+and `ARTIST` tags might contain characters which cannot be used in filenames,
+e.g. with `-p` this would fail: `ARTIST=Some Artist / Other Artist`
+As a convenience a user configurable function is provided, where (invalid)
+characters can be mapped to others or deleted.
 
 You should update the configuration options in the script to meet your environment.
 
@@ -164,9 +169,9 @@ Temporary files created by AtomicParsley are not deleted (yet).
 Error handling is rather rare...
 
 ### Limitations
-Encoding of gapless songs results in a gap. It seems to be not possible with
-`ffmpeg` and the `libfdk_aac` AAC library (as I have not found a way to 
-create the `iTunSMPB` tag).
+Multiple instances of a tag in a source file cannot (or I cannot?) be
+handled in the target MP4 container, and therefore only the first found
+instance is used.
 
 Function `logRun()` (used for logging the executed commands) will not log
 redirects (or pipes).
