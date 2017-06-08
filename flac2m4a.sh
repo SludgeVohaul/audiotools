@@ -8,7 +8,7 @@
 set -o nounset
 
 
-VERSION="20170608"
+VERSION="20170608_1"
 
 # If AtomicParsley is not present the coverart image will not be written to
 # the converted file, but everything will be fine otherwise.
@@ -27,7 +27,6 @@ SORT=/usr/bin/sort
 GREP=/usr/bin/grep
 SED=/usr/bin/sed
 PWD=/bin/pwd
-BASENAME=/usr/bin/basename
 FILE=/usr/bin/file
 TR=/usr/bin/tr
 CAT=/bin/cat
@@ -766,7 +765,7 @@ function run()
 }
 
 #############################################################################
-PROGRAM=$(${BASENAME} "$0")
+PROGRAM="${0##*/}"
 
 VERBOSITY=0
 ENCODING_ARGS=( "${VBR[@]}" )
