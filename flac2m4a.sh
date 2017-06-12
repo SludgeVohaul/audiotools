@@ -6,9 +6,11 @@
 #set -o errexit
 # Readable 'set -u'
 set -o nounset
+# Readable 'set -E'
+set -o errtrace
 
 
-VERSION="20170608_1"
+VERSION="20170613"
 
 # If AtomicParsley is not present the coverart image will not be written to
 # the converted file, but everything will be fine otherwise.
@@ -238,7 +240,8 @@ function addFileToTmpPlaylist()
 
 	# Mapped album value.
 	local mappedAlbumMetadataValue
-	mapCharacters "${albumMetadataValue}" "album" && mappedAlbumMetadataValue="${___}"
+	mapCharacters "${albumMetadataValue}" "album"
+	mappedAlbumMetadataValue="${___}"
 
 	# The artist value.
 	local artistMetadataValue
@@ -246,7 +249,8 @@ function addFileToTmpPlaylist()
 
 	# Mapped artist value.
 	local mappedArtistMetadataValue
-	mapCharacters "${artistMetadataValue}" "artist" && mappedArtistMetadataValue="${___}"
+	mapCharacters "${artistMetadataValue}" "artist"
+	mappedArtistMetadataValue="${___}"
 
 	# Filename of the temp. playlist file.
 	local tmpPlaylistFilename
@@ -326,7 +330,7 @@ function logRun()
 
 	if (( VERBOSITY >= COMMAND_LEVEL )); then
 		# Readable 'set -x'
-		(set -o xtrace; "${commands[@]}")
+		(set -o xtrace; "${commands[@]}") || return 1
 	else
 		"${commands[@]}"
 	fi
@@ -362,7 +366,11 @@ function processCoverart()
 		exportEmbeddedCoverart "${absSrcFile}" "${coverArtMetadataBlockLine##*#}"
 		addCoverart "${absTargetFile}" "${ABS_TMP_COVERART_FILE}" "embedded"
 		existsEmbeddedCoverartFile=1
-	done 3< <("${METAFLAC}" --list --block-type=PICTURE "${absSrcFile}" | "${GREP}" "METADATA block" )
+	# FYI: grep returns 1 on an empty selection (i.e. when the metadata contains
+	# no metadata block). This triggers the ERR trap, which is wrong - script
+	# should not exit when there is no embedded cover art.
+	# Exit subshell with 0 on grep's retval 0 or 1 and exit with 1 otherwise.
+	done 3< <("${METAFLAC}" --list --block-type=PICTURE "${absSrcFile}" | "${GREP}" "METADATA block" || (( $? == 1 )) && exit 0 || exit 1 )
 
 	# If there was no embedded cover art in the source file, try to add a copy
 	# of the file from the album's directory.
@@ -387,7 +395,7 @@ function exportEmbeddedCoverart()
 	local coverArtBlock="$2"
 
 	log "${SUBTASK_LEVEL}" "Exporting cover art file (FLAC metadata block ${coverArtBlock})..."
-	logRun "${METAFLAC}" --block-number="${coverArtBlock}"  --export-picture-to="${ABS_TMP_COVERART_FILE}" "${absSrcFile}"
+	logRun "${METAFLAC}" --block-number="${coverArtBlock}" --export-picture-to="${ABS_TMP_COVERART_FILE}" "${absSrcFile}"
 
 	((NESTING_LEVEL--))
 }
@@ -401,7 +409,7 @@ function getFileExtension()
 
 	log "${SUBTASK_LEVEL}" "Detecting file extension..."
 	local fileExtensions
-	fileExtensions=$(logRun "${FILE}" -b --extension "${absSrcCoverartFile}" 3)
+	fileExtensions=$("${FILE}" -b --extension "${absSrcCoverartFile}")
 
 	# Gets the first extension 'file' suggests.
 	# E.g. jpeg/jpg/jpe/jfif -> jpeg
@@ -460,13 +468,15 @@ function addCoverart()
 		local fileExtension
 		fileExtension="UNKNOWN"
 		log "${SUBTASK_LEVEL}" "Fixing missing file extension..."
-		getFileExtension "${absSrcCoverartFile}" && fileExtension="${__}"
+
+		getFileExtension "${absSrcCoverartFile}"
+		fileExtension="${__}"
+
 		addExtensionToFile "${absSrcCoverartFile}" "${fileExtension}"
 		absSrcCoverartFileWithExtension="${absSrcCoverartFile}.${fileExtension}"
 	fi
 
 	log "${SUBTASK_LEVEL}" "Importing cover art (${embeddableCoverartType} file)..."
-	# Re
 	logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absSrcCoverartFileWithExtension}" --overWrite 1>/dev/null
 
 	removeAbsFile "${SUBTASK_LEVEL}" "${absSrcCoverartFileWithExtension}" "Deleting exported cover art file..."
@@ -611,7 +621,8 @@ function doAAC()
 	if (( IS_GAPLESS )); then fdkaacAllArgs+=( "${fdkaacGaplessArgs[@]}" ); fi
 
 	local tagArgs=()
-	createMetadataTagArgs && tagArgs=( "${____[@]}" )
+	createMetadataTagArgs
+	tagArgs=( "${____[@]}" )
 
 	log "${TASK_LEVEL}" "Encoding WAV -> AAC"
 	logRun "${FDKAAC}" "${fdkaacAllArgs[@]}" "${tagArgs[@]}" -o "${absTargetFile}" "${ABS_TMP_WAV_FILE}"
@@ -764,6 +775,13 @@ function run()
 	log "${FILE_LEVEL}" "All done."
 }
 
+function handleError() {
+  local lineNumber="$1"
+
+  echo "Exiting due to an error near line ${lineNumber}."
+  exit 1
+}
+
 #############################################################################
 PROGRAM="${0##*/}"
 
@@ -793,6 +811,8 @@ ABS_TMP_COVERART_FILE="${ABS_TMP_DIR}/coverart"
 RED='\033[0;31m'
 LIGHTRED='\033[1;31m'
 NOCOLOR='\033[0m'
+
+trap 'handleError ${LINENO}' ERR
 
 HAS_ATOMICPARSLEY=0
 if [ -f "${ATOMICPARSLEY}" ]; then HAS_ATOMICPARSLEY=1; fi
