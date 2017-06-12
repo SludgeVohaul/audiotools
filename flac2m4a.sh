@@ -10,7 +10,7 @@ set -o nounset
 set -o errtrace
 
 
-VERSION="20170613"
+VERSION="20170613_1"
 
 # If AtomicParsley is not present the coverart image will not be written to
 # the converted file, but everything will be fine otherwise.
@@ -83,6 +83,11 @@ ABS_TMP_DIR="${ABS_CURRENT_DIR}/tmpdir"
 # same directory the FLAC files are located instead.
 # The value is just the file name without a path.
 ALBUM_COVERART_FILE="Front.jpg"
+
+# File flagging an album as being gapless (e.g. a live album).
+# When '-g' is used, FLAC files located in the same directory as this file
+# will be processed as gapless. For directories without this file '-g' is ignored.
+GAPLESS_ALBUM_FLAG_FILE=".gapless"
 
 # Resize cover art images so that either the width or height (which ever side
 # is larger) have MAX_COVERART_DIMENSION pixels.
@@ -165,7 +170,9 @@ Usage:
    The switch fixes SYNC2'"'"'s brain dead alphabetic play order to track order by
    adding the track number to the title tag ('"'"'Some Title'"'"' -> '"'"'03 Some Title'"'"').
 
--g gapless mode - creates pgag and iTunSMPB in the converted file.
+-g gapless mode - creates pgag and iTunSMPB in the converted file. A user
+   configurable file is required to exist in the same directory as the source
+   file(s), otherwise the source file(s) will not be processed as gapless.
 
 -p creates simple m3u playlists in targetdir named by the artist and album tags
    found in the converted files.
@@ -618,7 +625,7 @@ function doAAC()
 
 	local fdkaacAllArgs=( "${fdkaacBaseArgs[@]}" )
 	fdkaacAllArgs+=( "${fdkaacEncoderArgs[@]}" )
-	if (( IS_GAPLESS )); then fdkaacAllArgs+=( "${fdkaacGaplessArgs[@]}" ); fi
+	if (( IS_GAPLESS )) && [ -f "${absSrcFile%/*}/${GAPLESS_ALBUM_FLAG_FILE}" ]; then fdkaacAllArgs+=( "${fdkaacGaplessArgs[@]}" ); fi
 
 	local tagArgs=()
 	createMetadataTagArgs

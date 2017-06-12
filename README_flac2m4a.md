@@ -36,7 +36,9 @@ ssh freenas01 "cd /path/to/the\ artist; tar cf - the\ album" | tar xf - -C /path
    The switch fixes SYNC2's brain dead alphabetic play order to track order by
    adding the track number to the title tag ('Some Title' -> '03 Some Title').
 
--g gapless mode - creates pgag and iTunSMPB in the converted file.
+-g gapless mode - creates pgag and iTunSMPB in the converted file. A user
+   configurable file is required to exist in the same directory as the source
+   file(s), otherwise the source file(s) will not be processed as gapless.
 
 -p creates simple m3u playlists in targetdir named by the artist and album tags
    found in the source files.
