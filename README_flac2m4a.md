@@ -19,24 +19,26 @@ ssh freenas01 "cd /path/to/the\ artist; tar cf - the\ album" | tar xf - -C /path
 
 ### Usage
 ```
-./flac2m4a.sh [-v] [-b cbr|vbr ] [-m] [-t] [-p|q] [-r] [-j] [-x] srcdir targetdir
+./flac2m4a.sh [-v] [-b cbr|vbr] [-t] [-g] [-p|q] [-r] [-j] [-x] srcdir targetdir
 
 -v increases the verbosity level. A higher level means more output to stdout.
-   Level 0: Warnings and errors only.
-   Level 1: Transcoded files.
-   LeveL 2: Info about cover art, metadata, playlists,...
-   Level 3: Executed commands
+   Level 0: (no -v) Warnings and errors only
+   Level 1: Processed files
+   LeveL 2: Tasks (Encoding to AAC, Adding cover art,...)
+   Level 3: Subtasks (Task: Adding cover art; Subtask: Detecting file type,...)
+   Level 4: Details (e.g. Mappings)
+   Level 5: (-vvvvv) Executed commands
 
--b toggles between constant and variable bitrate. Default is CBR.
-
--m fixes the original metadata before it is added to the target file.
-   The implemented code is just an example (for my real life problem).
-   See the script source for more information.
+-b toggles between constant and variable bitrate. Default is VBR.
 
 -t Ford's SYNC2 ignores track numbers and plays the tracks sorted
    alphabetically by their title tag.
    The switch fixes SYNC2's brain dead alphabetic play order to track order by
    adding the track number to the title tag ('Some Title' -> '03 Some Title').
+
+-g gapless mode - creates pgag and iTunSMPB in the converted file. A user
+   configurable file is required to exist in the same directory as the source
+   file(s), otherwise the source file(s) will not be processed as gapless.
 
 -p creates simple m3u playlists in targetdir named by the artist and album tags
    found in the source files.
@@ -96,8 +98,11 @@ these two conditions is met:
 The FLAC files should be tagged. Untagged files may lead to undesired results
 when creating playlists.
 
-Creating playlists with `-p` or `-q` might fail as the title tags might contain
-characters which cannot be used in filenames.
+Creating playlists with `-p` or `-q` might fail as the values in the `TITLE`
+and `ARTIST` tags might contain characters which cannot be used in filenames,
+e.g. with `-p` this would fail: `ARTIST=Some Artist / Other Artist`
+As a convenience a user configurable function is provided, where (invalid)
+characters can be deleted or mapped to other characters.
 
 You should update the configuration options in the script to meet your environment.
 
@@ -105,7 +110,7 @@ You should always work with a copy of your files - if things go wrong and your
 files get corrupted you can blame me or whomever, but your files will still be gone...
 
 ### Ford SYNC2
-The `-m`, `-q` and `-r` parameters are probably relevant to Ford SYNC2 users
+The `-q` and `-r` parameters are probably relevant to Ford SYNC2 users
 only (or maybe other jinxes, using the same ingenious media software).
 These are my observations:
 
@@ -118,11 +123,11 @@ The audio files can be located in subdirectories e.g. `X:\My Music\Ramones\...`.
 * Playlists located in an album's directory seem to break SYNC2's indexing
 process. If you have such playlists, audio files won't be indexed correctly
 (meaning not at all, even those in other directories).
-* The media player seems to handle `LF` as well as `CRLF` newlines (.i.e.
+* The media player seems to handle `LF` as well as `CRLF` newlines (i.e.
 playlists can be created under Windows as well as Unix-like OSes).
 * The cover art is limited to 500x500px. Though I have successfully
-imported files with much higher resolutions into SYNC2, there were always a
-few files where the cover art was not displayed. The technical parameters of
+imported files with much higher resolutions into SYNC2, there have always been
+a few files where the cover art was not displayed. The technical parameters of
 the working and non working files were the same - the FLAC files have been
 created with the same parameters (CD rip), the M4A files too. Embedding the
 image from the working file into the other one did not work either.
@@ -130,43 +135,36 @@ Only using cover art images with not more than 500x500px seems to work.
 
 ### Examples
 ```bash
-./flac2m4a.sh -vvvprb vbr relative/path/in /some/path/out
+./flac2m4a.sh -vvvprb cbr in /some/path/out
 ```
 
 or
 
 ```bash
-./flac2m4a.sh -v -r -v -v -b vbr -p relative/path/in /some/path/out
+./flac2m4a.sh -v -r -v -v -b cbr -p in /some/path/out
 ```
 
 Result:
 
-* Level 3 output (error/warnings, processed files, cover art, metadata,
-  playlists, executed commands).
-* Uses variable bitrate
+* Level 3 output
+* Uses constant bitrate
 * Creates unix-style playlists
 * Resizes cover art files (located in the album directory or embedded
-  in source files) if either their width or height exceed the defined
+  in source files) if either their width or height exceeds the defined
   (in the script) max. number of pixels.
 * Searches for FLAC files in the `in` directory below the current directory.
 * Creates M4A files in the `/some/path/out` directory.
 
 ### Known issues
-The example for the -m parameter described in the script is probably obsolete,
-as ffmpeg at least in version `git-2017-02-11-25d9cb4` detects the invalid ID3
-tags already.
-
 When aborted (e.g. File exists. Overwrite? No) the `tempdir` (and eventually
 the `*.m3u.tmp` files) are not cleaned up.
-
-Temporary files created by AtomicParsley are not deleted (yet).
 
 Error handling is rather rare...
 
 ### Limitations
-Encoding of gapless songs results in a gap. It seems to be not possible with
-`ffmpeg` and the `libfdk_aac` AAC library (as I have not found a way to 
-create the `iTunSMPB` tag).
+Multiple instances of a tag in a source file cannot (or I cannot?) be
+handled in the target MP4 container, and therefore only the first found
+instance is used.
 
 Function `logRun()` (used for logging the executed commands) will not log
 redirects (or pipes).

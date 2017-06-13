@@ -1,15 +1,21 @@
 #!/bin/bash
-set -e
-set -u
+# Needs bash due to used process substitutions '<(cmd_list)' or '>(cmd_list)'
 
-# Cannot use /bin/sh due to process substitution in run().
+# Readable 'set -e'
+# Maybe one should not use it: http://mywiki.wooledge.org/BashFAQ/105
+#set -o errexit
+# Readable 'set -u'
+set -o nounset
+# Readable 'set -E'
+set -o errtrace
 
-VERSION="20170525"
 
-# It seems to be impossible to add coverart to aac encoded streams in an MP4
-# container via ffmpeg. Therefore I use AtomicParsley.
-# If it is not present the coverart image will not be written to the output
-# file, but everything will be fine otherwise.
+VERSION="20170613_1"
+
+# If AtomicParsley is not present the coverart image will not be written to
+# the converted file, but everything will be fine otherwise.
+# Install through homebrew with
+# brew install atomicparsley --HEAD
 ATOMICPARSLEY=/usr/local/bin/AtomicParsley
 # See AtomicParsley --longhelp
 ATOMICPARSLEY_PIC_OPTIONS="DPI=72:removeTempPix"
@@ -23,35 +29,53 @@ SORT=/usr/bin/sort
 GREP=/usr/bin/grep
 SED=/usr/bin/sed
 PWD=/bin/pwd
-BASENAME=/usr/bin/basename
 FILE=/usr/bin/file
+TR=/usr/bin/tr
+CAT=/bin/cat
+SEQ=/usr/bin/seq
 
-# We need ffmpeg with fdk-aac. Install through homebrew with
-# brew install ffmpeg --HEAD --without-libvo-aacenc --without-qtkit --with-fdk-aac
-FFMPEG=/usr/local/bin/ffmpeg
-FFMPEG_LOGGING_ARGS=( "-loglevel" "warning" )
-#FFMPEG_LOGGING_ARGS=( "-loglevel" "info" )
-FFMPEG_BASE_ARGS=( "-hide_banner" )
+# Add mappings of Vorbis tags to iTunes tags here.
+# How it works: Each tag found in the source FLAC file is converted to lower
+# case (because e.g. a song's name could stored in TITLE or Title) and
+# compared to the string ahead of the colon of each defined mapping until a
+# match is found (the string is also converted to lower case first).
+# If a matching string is found, the string behind the colon is used as the
+# iTunes tag name in the MP4 target file.
+# This string is case sensitive!
+#
+# A basic overview for Vorbis:
+# https://www.xiph.org/vorbis/doc/v-comment.html
+# An overview for iTunes:
+# https://code.google.com/archive/p/mp4v2/wikis/iTunesMetadata.wiki
+TAG_MAPPINGS=()
+TAG_MAPPINGS+=( "artist:ART" )
+TAG_MAPPINGS+=( "title:nam" )
+TAG_MAPPINGS+=( "album:alb" )
+TAG_MAPPINGS+=( "date:day" )
+TAG_MAPPINGS+=( "tracknumber:trkn" )
+TAG_MAPPINGS+=( "genre:gen" )
+TAG_MAPPINGS+=( "comment:cmt" )
 
-FFPROBE=/usr/local/bin/ffprobe
-FFPROBE_BASE_ARGS=( "-hide_banner" )
-FFPROBE_LOGGING_ARGS=( "-loglevel" "error" )
+# Install through homebrew with
+# brew install flac --HEAD
+FLAC=/usr/local/bin/flac
+METAFLAC=/usr/local/bin/metaflac
 
-# Constant bitrate encoding parameters:
-CBR=( "-b:a" "128k" )
-# Variable bitrate encoding parameters:
-VBR=( "-vbr" "3" )
+# See http://wiki.hydrogenaud.io/index.php?title=Fraunhofer_FDK_AAC#fdkaac
+# Install through homebrew with
+# brew install fdk-aac-encoder
+FDKAAC=/usr/local/bin/fdkaac
 
-# ######### TODO these values are not really user configurable right now #####
+# See
+# http://wiki.hydrogenaud.io/index.php?title=Fraunhofer_FDK_AAC
+# for more info.
+# Constant bitrate AAC encoding parameters:
+CBR=( "--bitrate" "128000" )
+# Variable bitrate AAC encoding parameters:
+VBR=( "--bitrate-mode" "3" )
+
 ABS_CURRENT_DIR=$("${PWD}")
 ABS_TMP_DIR="${ABS_CURRENT_DIR}/tmpdir"
-
-ABS_TMP_AAC_FILE="${ABS_TMP_DIR}/audiofile.m4a"
-ABS_TMP_METADATA_FILE="${ABS_TMP_DIR}/metadata"
-# This is the base part of cover art file names.
-# The real file names will have an 5-digit index, i.e. 'coverart00010'.
-ABS_TMP_COVERART_FILE="${ABS_TMP_DIR}/coverart"
-# ############################################################################
 
 # On LogitechMediaServer I do not have the cover art embedded in each file,
 # I have one JPG inside the album's directory.
@@ -60,35 +84,64 @@ ABS_TMP_COVERART_FILE="${ABS_TMP_DIR}/coverart"
 # The value is just the file name without a path.
 ALBUM_COVERART_FILE="Front.jpg"
 
+# File flagging an album as being gapless (e.g. a live album).
+# When '-g' is used, FLAC files located in the same directory as this file
+# will be processed as gapless. For directories without this file '-g' is ignored.
+GAPLESS_ALBUM_FLAG_FILE=".gapless"
+
 # Resize cover art images so that either the width or height (which ever side
 # is larger) have MAX_COVERART_DIMENSION pixels.
 MAX_COVERART_DIMENSION=500
 
-# This function is called when "-m" is used.
-# Background:
-# I ripped, encoded and tagged my CDs with EAC and friends, and somehow
-# managed it to add both ID3v2 and Vorbis tags into the FLAC files.
-# This has never been an issue with LogitechMediaServer, but now it is an issue:
-# ffprobe -i file.flac
-# ...
-# ARTIST          : Ramones;Ramones
-# ALBUM           : Leave Home;Leave Home
-# TITLE           : California Sun (BMI);California Sun (BMI)
-# DATE            : 1977;1977
-# ...
-# FYI, Mp3Tag can fix it:
-# http://forums.mp3tag.de/index.php?showtopic=2645&st=0&p=19976&#entry19976
-#
-# So in case you need to modify your metadata (or add new tags) do it in this
-# function.
-function fixMetadata()
+# ----------------------------------------------------------------------------
+function mapCharacters()
 {
-	log "Fixing metadata..." 2
-	########## Write your own metadata fixes here.##########
-	# Delete all characters between '=' and ';'.
-	logRun "${SED}" -i "" 's/=.*\\;/=/' "${ABS_TMP_METADATA_FILE}" 3
-	########################################################
-	log "Done." 3
+	((NESTING_LEVEL++))
+
+	local stringValue="$1"
+	local stringType="$2"
+
+	local stringMappings=()
+
+	log "${DETAILS_LEVEL}" "Mapping '${stringType}' characters:"
+
+	if  [ "${stringType}" == "artist" ]; then
+		############## Put mappings for <artist> below. ######################
+		# The Ramones / the OtherArtist -> Ramones / The OtherArtist
+		stringMappings+=( "s/^[Tt]he//" )
+		# Ramones / the OtherArtist -> Ramones /OtherArtist
+		stringMappings+=( "s/\/[[:blank:]]*[Tt]he /\//" )
+		# Ramones/ OtherArtist -> Ramones And OtherArtist
+		# Ramones \OtherArtist -> Ramones And OtherArtist
+		stringMappings+=( "s/[[:blank:]]*[\/\\][[:blank:]]*/ And /" )
+		############## Put mappings for <artist> above. ######################
+	elif [ "${stringType}" == "album" ]; then
+		############## Put mappings for <album> below. #######################
+		# What / Ever -> What Ever
+		# What \Ever -> What Ever
+		stringMappings+=( "s/[[:blank:]]*\/[[:blank:]]*/ /" )
+		# It's Alive -> Its Alive
+		stringMappings+=( "s/'//" )
+		############## Put mappings for <album> above. #######################
+	else
+		# Should never get here...
+		logError "Unknown string type - characters will not be mapped!"
+	fi
+
+	for mapping in "${stringMappings[@]}"; do
+		local originalString
+		originalString="${stringValue}"
+		stringValue=$("${SED}" "${mapping}" <<< "${stringValue}")
+		if [ "${originalString}" != "${stringValue}" ]; then
+			log "${DETAILS_LEVEL}" "${originalString} -> ${stringValue}"
+		fi
+	done
+
+	___="${stringValue}"
+
+	((NESTING_LEVEL--))
+
+	return 0
 }
 
 # No user configurable options below this line.
@@ -100,24 +153,26 @@ Version:
 '"${VERSION}"'
 
 Usage:
-'"${PROGRAM}"' [-v] [-b cbr|vbr] [-m] [-t] [-p|q] [-r] [-j] [-x] srcdir targetdir
+'"${PROGRAM}"' [-v] [-b cbr|vbr] [-t] [-g] [-p|q] [-r] [-j] [-x] srcdir targetdir
 
 -v increases the verbosity level. A higher level means more output to stdout.
-   Level 0: Warnings and errors only.
-   Level 1: Transcoded files.
-   LeveL 2: Processing of cover art, metadata, playlists, temp file deletions.
-   Level 3: Executed commands.
+   Level 0: (no -v) Warnings and errors only
+   Level 1: Processed files
+   LeveL 2: Tasks (Encoding to AAC, Adding cover art,...)
+   Level 3: Subtasks (Task: Adding cover art; Subtask: Detecting file type,...)
+   Level 4: Details (e.g. Mappings)
+   Level 5: (-vvvvv) Executed commands
 
--b toggles between constant and variable bitrate. Default is CBR.
-
--m fixes the original metadata before it is added to the target file.
-   The implemented code is just an example (for my real life problem).
-   See the script source for more information.
+-b toggles between constant and variable bitrate. Default is VBR.
 
 -t Ford'"'"'s SYNC2 ignores track numbers and plays the tracks sorted
    alphabetically by their title tag.
    The switch fixes SYNC2'"'"'s brain dead alphabetic play order to track order by
    adding the track number to the title tag ('"'"'Some Title'"'"' -> '"'"'03 Some Title'"'"').
+
+-g gapless mode - creates pgag and iTunSMPB in the converted file. A user
+   configurable file is required to exist in the same directory as the source
+   file(s), otherwise the source file(s) will not be processed as gapless.
 
 -p creates simple m3u playlists in targetdir named by the artist and album tags
    found in the converted files.
@@ -153,42 +208,61 @@ Always use double quotes around names with spaces, or things won'"'"'t work.
 # ----------------------------------------------------------------------------
 function fixSync2()
 {
-	# The track value, e.g.: 02 -> 00002
+	((NESTING_LEVEL++))
+
+	# The track value, e.g.: 2 (or 02) -> 02
 	# FYI - echo "08" | xargs printf "%02d" will not work as numbers with a leading 0 a regarded as octal!
 	# Convert it therefore to base 10 with (( ... ))
 	local trackMetadataFormattedValue
-	trackMetadataFormattedValue=$(printf "%02d" $(( 10#$("${GREP}" -i ^track "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
+	trackMetadataFormattedValue=$(printf "%02d" $(( 10#$("${GREP}" -im 1 ^tracknumber "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
 
-	# The title key, e.g.: TITLE
-	local titleMetadataKey
-	titleMetadataKey=$("${GREP}" -io ^title "${ABS_TMP_METADATA_FILE}")
+	# The title tag, e.g.: TITLE
+	local titleMetadataTag
+	titleMetadataTag=$("${GREP}" -iom 1 ^title "${ABS_TMP_METADATA_FILE}")
 
-	log "Fixing SYNC2 issues..." 2
-	logRun "${SED}" -i "" "s/${titleMetadataKey}=/${titleMetadataKey}=${trackMetadataFormattedValue} /" "${ABS_TMP_METADATA_FILE}" 3
-	log "Done." 3
+	log "${TASK_LEVEL}" "Fixing SYNC2 issues..."
+	logRun "${SED}" -i "" "s/${titleMetadataTag}=/${titleMetadataTag}=${trackMetadataFormattedValue} /" "${ABS_TMP_METADATA_FILE}"
+
+	((NESTING_LEVEL--))
 }
 
 # ----------------------------------------------------------------------------
-function addFileToPlaylist()
+function addFileToTmpPlaylist()
 {
-	local absTargetFile="$1"
-	local absTargetRootDir="$2"
+	((NESTING_LEVEL++))
 
-	# The track value, e.g.: 02 -> 00002
+	local relTargetFile="$1"
+
+	log "${TASK_LEVEL}" "Creating temporary playlist entry..."
+
+	# The track value, e.g.: 2 (or 02) -> 02
 	# FYI - echo "08" | xargs printf "%02d" will not work as numbers with a leading 0 a regarded as octal!
 	# Convert it therefore to base 10 with (( ... ))
 	local trackMetadataFormattedValue
-	trackMetadataFormattedValue=$(printf "%05d" $(( 10#$("${GREP}" -i ^track "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
-	# The album value
-	local albumMetadataValue
-	albumMetadataValue=$("${GREP}" -i ^album "${ABS_TMP_METADATA_FILE}" | "${SED}" s/"^.*="//)
-	# The artist value
-	local artistMetadataValue
-	artistMetadataValue=$("${GREP}" -i ^artist "${ABS_TMP_METADATA_FILE}" | "${SED}" s/"^.*="//)
+	trackMetadataFormattedValue=$(printf "%05d" $(( 10#$("${GREP}" -im 1 ^track "${ABS_TMP_METADATA_FILE}" | "${GREP}" -o [0-9].*) )) )
 
-	# /a/b/c/targetdir/x/y/z/aa.m4a -> x/y/z/aa.m4a
-	local relTargetFile
-	relTargetFile="${absTargetFile#${absTargetRootDir}/}"
+	# The album value.
+	local albumMetadataValue
+	albumMetadataValue=$("${GREP}" -im 1 ^album "${ABS_TMP_METADATA_FILE}" | "${SED}" s/"^.*="//)
+
+	# Mapped album value.
+	local mappedAlbumMetadataValue
+	mapCharacters "${albumMetadataValue}" "album"
+	mappedAlbumMetadataValue="${___}"
+
+	# The artist value.
+	local artistMetadataValue
+	artistMetadataValue=$("${GREP}" -im 1 ^artist "${ABS_TMP_METADATA_FILE}" | "${SED}" s/"^.*="//)
+
+	# Mapped artist value.
+	local mappedArtistMetadataValue
+	mapCharacters "${artistMetadataValue}" "artist"
+	mappedArtistMetadataValue="${___}"
+
+	# Filename of the temp. playlist file.
+	local tmpPlaylistFilename
+	tmpPlaylistFilename="${mappedArtistMetadataValue} ${mappedAlbumMetadataValue}"
+
 	if (( CREATE_DOS_PLAYLIST )); then
 		# x/y/z/aa.m4a -> \x\y\z\aa.m4a
 		relTargetFile="\\${relTargetFile//\//\\}"
@@ -196,20 +270,63 @@ function addFileToPlaylist()
 
 	# 00010###x/y/z/aa.m4a >> /a/b/c/targetdir/<titletag>.m3u.tmp
 	local tmpPlaylistEntry="${trackMetadataFormattedValue}###${relTargetFile}"
-	log "Creating temporary playlist entry..." 2
-	log "${tmpPlaylistEntry}" 3
-	echo "${tmpPlaylistEntry}" >> "${absTargetRootDir}/${artistMetadataValue} ${albumMetadataValue}.m3u.tmp"
-	log "Done." 3
+	log "${DETAILS_LEVEL}" "Temporary playlist entry: ${tmpPlaylistEntry}"
+	echo "${tmpPlaylistEntry}" >> "${ABS_TARGET_ROOT_DIR}/${tmpPlaylistFilename}.m3u.tmp"
+
+	((NESTING_LEVEL--))
+}
+
+# ----------------------------------------------------------------------------
+function logWarn()
+{
+	local message="$1"
+
+	# Log to stderr
+	log "${ERROR_LEVEL}" "${RED}${message}${NOCOLOR}" 1>&2
+}
+
+# ----------------------------------------------------------------------------
+# TODO
+#function logError()
+#{
+#	local message="$1"
+#
+#	# Redirect stdout to stderr (line won't be shown on the terminal), but
+#	# can be written to a file with './flac2m4a.sh ... 2>errfile'
+#	echo "xxxxxxxxxxxAdditional error log information" 1>&2
+#	# Pipe stdout into tee which duplicates it to a "file" (1st) (the process
+#	# substitution) and redirect tee's 2nd output (2nd) (which goes to stdout)
+#	# to stderr.
+#	# With './flac2m4a.sh ... 2>errfile' the (1st) output is written to stdout
+#	# and the (2nd) output to stderr is redirected to 'errfile'.
+#	# BUT: The messages will be output TWICE if stderr is not redirected...
+#	log "${ERROR_LEVEL}" "${LIGHTRED}${message}${NOCOLOR}" | tee >(cat >&1) 1>&2
+#}
+function logError()
+{
+	local message="$1"
+
+	log "${ERROR_LEVEL}" "${LIGHTRED}${message}${NOCOLOR}" 1>&2
 }
 
 # ----------------------------------------------------------------------------
 function log()
 {
-	local message="$1"
-	local verbosityLevel=$2
+	local logLevel=$1
+	local message="$2"
 
-	if (( VERBOSITY >= verbosityLevel )); then
-		echo "${message}"
+	if (( VERBOSITY >= logLevel )); then
+		local nestingChars
+		nestingChars=""
+		# Output a "+" for nested shells only.
+		if (( NESTING_LEVEL > 0 )); then
+			# FYI: ".0" truncates the output at 0 chars, i.e. suppresses output.
+			# FYI: +%s -> +1+2+3
+			# FYI: +%.0s -> +++
+			nestingChars=$(printf '  %.0s' $("${SEQ}" -s ' ' 1 $NESTING_LEVEL))
+		fi
+
+		echo -e "${nestingChars}${message}"
 	fi
 }
 
@@ -218,60 +335,124 @@ function logRun()
 {
 	local commands=("$@")
 
-	# Read the last element (i.e. the verbosity level)
-	local verbosityLevel="${commands[$(( ${#commands[@]} - 1 ))]}"
-
-	# Remove last element (the verbosity level) from the commands array.
-	unset commands[$(( ${#commands[@]} - 1 ))]
-
-	if (( VERBOSITY >= verbosityLevel )); then
-		(set -x; "${commands[@]}")
+	if (( VERBOSITY >= COMMAND_LEVEL )); then
+		# Readable 'set -x'
+		(set -o xtrace; "${commands[@]}") || return 1
 	else
 		"${commands[@]}"
 	fi
 }
 
 # ----------------------------------------------------------------------------
-function addMetadata()
+function exportMetadata()
 {
-	local absTargetFile="$1"
+	((NESTING_LEVEL++))
 
-	local ffmpegInputArgs=( "-i" "${ABS_TMP_AAC_FILE}" "-i" "${ABS_TMP_METADATA_FILE}" )
-	local ffmpegAudioArgs=( "-map" "0:a:0" "-map_metadata" "1" "-c:0:a" "copy" "-flags" "+global_header" "-f" "mp4" )
-
-	log "Adding metadata..." 2
-	logRun "${FFMPEG}" "${FFMPEG_LOGGING_ARGS[@]}" "${FFMPEG_BASE_ARGS[@]}" "${ffmpegInputArgs[@]}" "${ffmpegAudioArgs[@]}" "${absTargetFile}" 3
-	log "Done." 3
-}
-
-# ----------------------------------------------------------------------------
-function hasEmbeddedCoverart()
-{
 	local absSrcFile="$1"
 
-	local ffprobeInputArgs=( "-i" "${absSrcFile}" )
-	local ffprobeDataArgs=( "-show_streams" "-select_streams" "v" )
+	local metaflacMedataArgs=( "--export-tags-to=${ABS_TMP_METADATA_FILE}" "--no-utf8-convert" )
 
-	local ffprobeAllArgs=(
-		"${FFPROBE_LOGGING_ARGS[@]}"
-		"${FFPROBE_BASE_ARGS[@]}"
-		"${ffprobeInputArgs[@]}"
-		"${ffprobeDataArgs[@]}")
+	log "${TASK_LEVEL}" "Exporting metadata..."
+	logRun "${METAFLAC}" "${metaflacMedataArgs[@]}" "${absSrcFile}"
 
-	# Check if the source file has an video stream.
-	if [ -z "$("${FFPROBE}" "${ffprobeAllArgs[@]}" )" ]; then
-		echo 0
-	else
-		echo 1
-	fi
+	((NESTING_LEVEL--))
 }
 
 # ----------------------------------------------------------------------------
-
 function processCoverart()
 {
+	((NESTING_LEVEL++))
+
 	local absSrcFile="$1"
 	local absTargetFile="$2"
+
+	log "${TASK_LEVEL}" "Processing cover art..."
+
+	local existsEmbeddedCoverartFile=0
+	while read -r -u3 coverArtMetadataBlockLine; do
+		exportEmbeddedCoverart "${absSrcFile}" "${coverArtMetadataBlockLine##*#}"
+		addCoverart "${absTargetFile}" "${ABS_TMP_COVERART_FILE}" "embedded"
+		existsEmbeddedCoverartFile=1
+	# FYI: grep returns 1 on an empty selection (i.e. when the metadata contains
+	# no metadata block). This triggers the ERR trap, which is wrong - script
+	# should not exit when there is no embedded cover art.
+	# Exit subshell with 0 on grep's retval 0 or 1 and exit with 1 otherwise.
+	done 3< <("${METAFLAC}" --list --block-type=PICTURE "${absSrcFile}" | "${GREP}" "METADATA block" || (( $? == 1 )) && exit 0 || exit 1 )
+
+	# If there was no embedded cover art in the source file, try to add a copy
+	# of the file from the album's directory.
+	if (( ! existsEmbeddedCoverartFile )); then
+		if [ -f "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" ]; then
+			copyAbsFile "${SUBTASK_LEVEL}" "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" "${ABS_TMP_DIR}/${ALBUM_COVERART_FILE}" "Creating working copy of the album cover art file..."
+			addCoverart "${absTargetFile}" "${ABS_TMP_DIR}/${ALBUM_COVERART_FILE}" "album"
+		else
+			logWarn "Cover art not available."
+		fi
+	fi
+
+	((NESTING_LEVEL--))
+}
+
+# ----------------------------------------------------------------------------
+function exportEmbeddedCoverart()
+{
+	((NESTING_LEVEL++))
+
+	local absSrcFile="$1"
+	local coverArtBlock="$2"
+
+	log "${SUBTASK_LEVEL}" "Exporting cover art file (FLAC metadata block ${coverArtBlock})..."
+	logRun "${METAFLAC}" --block-number="${coverArtBlock}" --export-picture-to="${ABS_TMP_COVERART_FILE}" "${absSrcFile}"
+
+	((NESTING_LEVEL--))
+}
+
+# ----------------------------------------------------------------------------
+function getFileExtension()
+{
+	((NESTING_LEVEL++))
+
+	local absSrcCoverartFile="$1"
+
+	log "${SUBTASK_LEVEL}" "Detecting file extension..."
+	local fileExtensions
+	fileExtensions=$("${FILE}" -b --extension "${absSrcCoverartFile}")
+
+	# Gets the first extension 'file' suggests.
+	# E.g. jpeg/jpg/jpe/jfif -> jpeg
+	# FYI: cannot use echo to return the value because of the log() calls.
+	# Therefore the value is written to a global variable '__' (could be as
+	# well called 'YADAYADAYADA')
+	__="${fileExtensions%%/*}"
+
+	((NESTING_LEVEL--))
+
+	return 0
+}
+
+# ----------------------------------------------------------------------------
+function addExtensionToFile()
+{
+	((NESTING_LEVEL++))
+
+	local absSrcCoverartFile="$1"
+	local fileExtension="$2"
+
+	log "${SUBTASK_LEVEL}" "Adding extension to cover art file (${fileExtension})..."
+	# /some/path/<name> -> /some/path/<name>.XXX
+	logRun "${MV}" "${absSrcCoverartFile}" "${absSrcCoverartFile}.${fileExtension}"
+
+	((NESTING_LEVEL--))
+}
+
+# ----------------------------------------------------------------------------
+function addCoverart()
+{
+	((NESTING_LEVEL++))
+
+	local absTargetFile="$1"
+	local absSrcCoverartFile="$2"
+	local embeddableCoverartType="$3"
 
 	export PIC_OPTIONS
 	PIC_OPTIONS="${ATOMICPARSLEY_PIC_OPTIONS}"
@@ -280,209 +461,275 @@ function processCoverart()
 		PIC_OPTIONS="${PIC_OPTIONS}:MaxDimensions=${MAX_COVERART_DIMENSION}"
 	fi
 
-	local existsEmbeddedCoverartFile=0
-
-	# Try to add the cover art file(s) embedded in the source file first.
-	while read -d '' -r -u3 absEmbeddedCoverartFile; do
-		addCoverart "${absTargetFile}" "${absEmbeddedCoverartFile}" "embedded"
-		existsEmbeddedCoverartFile=1
-	done 3< <("${FIND}" "${ABS_TMP_DIR}" -type f -maxdepth 1 -name "${ABS_TMP_COVERART_FILE##*/}"[0-9][0-9][0-9][0-9][0-9] -print0 | "${SORT}" -z)
-
-	# If there was no embedded cover art in the source file, try to add a copy
-	# of the file from the album's directory.
-	if (( ! existsEmbeddedCoverartFile )); then
-		if [ -f "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" ]; then
-			log "Creating working copy of the album cover art file..." 2
-			logRun "${CP}" -i "${absSrcFile%/*}/${ALBUM_COVERART_FILE}" "${ABS_TMP_DIR}/${ALBUM_COVERART_FILE}" 3
-			log "Done." 3
-			addCoverart "${absTargetFile}" "${ABS_TMP_DIR}/${ALBUM_COVERART_FILE}" "album"
-		else
-			log "Skipping cover art." 2
-		fi
-	fi
-}
-
-# ----------------------------------------------------------------------------
-function getFileExtension()
-{
-	local absCoverartFile="$1"
-
-	log "+ Determining file extension..." 2
-	local fileExtensions
-	fileExtensions=$(logRun "${FILE}" -b --extension "${absCoverartFile}" 3)
-	log "+ Done." 3
-
-	# E.g. jpeg/jpg/jpe/jfif -> jpeg
-	# FYI: cannot use echo to return the value because of the log() calls.
-	# Therefore the value is written to a global variable '__' (could be as
-	# well called 'YADAYADAYADA')
-	__="${fileExtensions%%/*}"
-}
-
-# ----------------------------------------------------------------------------
-function addFileExension()
-{
-	local absSourceCoverartFile="$1"
-	local fileExtension="$2"
-
-	log "+ Adding extension '${fileExtension}' to cover art file..." 2
-	# /some/path/<name> -> /some/path/<name>.XXX
-	logRun "${MV}" "${absSourceCoverartFile}" "${absSourceCoverartFile}.${fileExtension}" 3
-	log "+ Done." 3
-}
-
-# ----------------------------------------------------------------------------
-function addCoverart()
-{
-	local absTargetFile="$1"
-	local absSourceCoverartFile="$2"
-	local embeddableCoverartType="$3"
-
-	log "Adding ${embeddableCoverartType} cover art..." 2
-
 	# FYI: AtomicParsley (0.9.6) segfaults when adding cover art files that
 	# need to be reencoded and do not have a file extension:
 	# 'AtomicParsley input.m4a --artwork file1 --overWrite' segfaults, while
 	# 'AtomicParsley input.m4a --artwork file1.asd --overWrite' works.
-	# 'asd' is not a placeholder - it seems as if any any extension was fine.
+	# 'asd' is not a placeholder - it seems as if any extension was fine.
+	local absSrcCoverartFileWithExtension
 
-	local absSourceCoverartFileWithExtension
-	# Check if cover art file has an extension (i.e. a dot in the basename).
-	if [[ "${absSourceCoverartFile##*/}" == *.* ]]; then
-		absSourceCoverartFileWithExtension="${absSourceCoverartFile}"
+	# Check if cover art file has a file extension (a dot in the basename).
+	if [[ "${absSrcCoverartFile##*/}" == *.* ]]; then
+		absSrcCoverartFileWithExtension="${absSrcCoverartFile}"
 	else
-		# Get the first extension 'file' suggests.
-		getFileExtension "${absSourceCoverartFile}" && local fileExtension="${__}"
-		addFileExension "${absSourceCoverartFile}" "${fileExtension}"
-		absSourceCoverartFileWithExtension="${absSourceCoverartFile}.${fileExtension}"
+		local fileExtension
+		fileExtension="UNKNOWN"
+		log "${SUBTASK_LEVEL}" "Fixing missing file extension..."
+
+		getFileExtension "${absSrcCoverartFile}"
+		fileExtension="${__}"
+
+		addExtensionToFile "${absSrcCoverartFile}" "${fileExtension}"
+		absSrcCoverartFileWithExtension="${absSrcCoverartFile}.${fileExtension}"
 	fi
 
-	log "+ Embedding cover art file..." 2
-	logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absSourceCoverartFileWithExtension}" --overWrite 3 2>&1 > /dev/null
-	log "+ Done." 3
+	log "${SUBTASK_LEVEL}" "Importing cover art (${embeddableCoverartType} file)..."
+	logRun "${ATOMICPARSLEY}" "${absTargetFile}" --artwork "${absSrcCoverartFileWithExtension}" --overWrite 1>/dev/null
 
-	log "+ Deleting temporary cover art file..." 2
-	removeAbsFile "${absSourceCoverartFileWithExtension}"
-	log "+ Done." 3
+	removeAbsFile "${SUBTASK_LEVEL}" "${absSrcCoverartFileWithExtension}" "Deleting exported cover art file..."
 
-	log "Done." 3
+	# AtomicParsley does not delete it's temporary files created during resizing.
+	# The cover art file 'some file.j.pg' is stored as e.g. 'some file.j-resized-1234.pg'
+	# Find files where the last dot in filename was replaced by '-resized-[0-9]+.'
+	removeAbsFilesByPattern "${SUBTASK_LEVEL}" \
+		"${absSrcCoverartFileWithExtension%.*}-resized-[[:digit:]]+.${absSrcCoverartFileWithExtension##*.}" \
+		"Deleting temporary file(s) left over by AtomicParsley..."
+
+	((NESTING_LEVEL--))
+}
+
+# ----------------------------------------------------------------------------
+function copyAbsFile()
+{
+	((NESTING_LEVEL++))
+
+	local logLevel="$1"
+	local absSrcFile="$2"
+	local absTargetFile="$3"
+	local message="$4"
+
+	if [ -f "${absSrcFile}" ]; then
+		# Log only if message is not an empty string.
+		if [ ! -z "${message}" ]; then log "${logLevel}" "${message}"; fi
+		logRun "${CP}" -i "${absSrcFile}" "${absTargetFile}"
+	else
+		# Should never get here...
+		logError "File not found: '${absSrcFile}'"
+	fi
+
+	((NESTING_LEVEL--))
+}
+
+# ----------------------------------------------------------------------------
+function removeAbsFilesByPattern()
+{
+	((NESTING_LEVEL++))
+
+	local logLevel="$1"
+	local absFilePattern="$2"
+	local message="$3"
+
+	# Log only if message is not an empty string.
+	if [ ! -z "${message}" ]; then log "${logLevel}" "${message}"; fi
+	while read -r -u3 absMatchingFile; do
+		removeAbsFile "${logLevel}" "${absMatchingFile}" ""
+	done 3< <("${FIND}" -E "${absFilePattern%/*}" -type f -maxdepth 1 -regex "${absFilePattern}" )
+
+	((NESTING_LEVEL--))
 }
 
 # ----------------------------------------------------------------------------
 function removeAbsFile()
 {
-	local absFile="$1"
+	((NESTING_LEVEL++))
+
+	local logLevel="$1"
+	local absFile="$2"
+	local message="$3"
 
 	if [ -f "${absFile}" ]; then
-		logRun "${RM}" "${absFile}" 3
+		# Log only if message is not an empty string.
+		if [ ! -z "${message}" ]; then log "${logLevel}" "${message}"; fi
+		logRun "${RM}" "${absFile}"
 	fi
+
+	((NESTING_LEVEL--))
 }
 
 # ----------------------------------------------------------------------------
-function createPlaylists()
+function createDirectory()
 {
-	local absTargetRootDir="$1"
+	((NESTING_LEVEL++))
 
-	if (( CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
-		log "-----------------------------------------------------------------------" 2
-		log "Creating playlist(s)..." 2
-		while read -d '' -r -u3 absTmpPlaylistFile; do
-			logRun "${SORT}" "${absTmpPlaylistFile}" -o "${absTmpPlaylistFile%.*}" 3
-			logRun "${SED}" -i "" s/"^[0-9]*###"// "${absTmpPlaylistFile%.*}" 3
-			removeAbsFile  "${absTmpPlaylistFile}"
-		done 3< <("${FIND}" "${absTargetRootDir}" -type f -name \*.m3u.tmp -print0)
-		log "Done." 3
-	fi
+	local logLevel="$1"
+	local absDirectoryPath="$2"
+
+	log "${logLevel}" "Creating directory '${absDirectoryPath}'..."
+	logRun "${MKDIR}" -p "${absDirectoryPath}"
+
+	((NESTING_LEVEL--))
+}
+
+# ----------------------------------------------------------------------------
+function createPlaylist()
+{
+	((NESTING_LEVEL++))
+
+	local absTmpPlaylistFile="$1"
+
+	log "${TASK_LEVEL}" "Creating playlist '${absTmpPlaylistFile%.*}'..."
+	logRun "${SORT}" "${absTmpPlaylistFile}" -o "${absTmpPlaylistFile%.*}"
+	logRun "${SED}" -i "" s/"^[0-9]*###"// "${absTmpPlaylistFile%.*}"
+	removeAbsFile "${SUBTASK_LEVEL}" "${absTmpPlaylistFile}" "Removing temporary playlist file..."
+
+	((NESTING_LEVEL--))
+}
+
+# ----------------------------------------------------------------------------
+function doWAV()
+{
+	((NESTING_LEVEL++))
+
+	local absSrcFile="$1"
+
+	local flacDecoderArgs=( "-s" "-d" "-f" )
+	# process 1s only.
+	local flacTestArgs=( "--until=0:01.00" )
+
+	local flacAllArgs=( "${flacDecoderArgs[@]}" )
+	if (( TEST_ONLY )); then flacAllArgs+=( "${flacTestArgs[@]}" ); fi
+
+	log "${TASK_LEVEL}" "Decoding FLAC -> WAV..."
+	logRun "${FLAC}" "${flacAllArgs[@]}" "${absSrcFile}" "-o" "${ABS_TMP_WAV_FILE}"
+
+	((NESTING_LEVEL--))
 }
 
 # ----------------------------------------------------------------------------
 function doAAC()
 {
+	((NESTING_LEVEL++))
+
 	local absSrcFile="$1"
 	local absTargetFile="$2"
-	local absTargetRootDir="$3"
 
-	local ffmpegInputArgs=( "-i" "${absSrcFile}" )
-	# Encode 1s only.
-	local ffmpegTestArgs=( "-ss" "00:00:00" "-t" "1" )
-	local ffmpegAudioArgs=( "-channel_layout" "stereo" "-map" "0:a:0" "-c:0:a" "libfdk_aac" "${ENCODING_PARAMS[@]}" "-f" "mp4" )
-	# Export the file's metadata.
-	local ffmpegMetadataArgs=( "-f" "ffmetadata" "${ABS_TMP_METADATA_FILE}" )
-	# Export all video streams.
-	local ffmpegCoverartArgs=( "-map" "0:v" "-c:v" "copy" "-f" "image2" )
+	# See
+	# http://wiki.hydrogenaud.io/index.php?title=Fraunhofer_FDK_AAC
+	# for more info.
+	# See
+	# https://sourceforge.net/p/mediainfo/feature-requests/398/
+	# for more info on iTunSMPB.
+	local fdkaacBaseArgs=( "--ignorelength" "--silent")
+	local fdkaacEncoderArgs=( "--profile" "2" "${ENCODING_ARGS[@]}" )
+	local fdkaacGaplessArgs=( "--gapless-mode" "2" "--tag" "pgap:1" )
 
-	local ffmpegAllArgs=( "${FFMPEG_LOGGING_ARGS[@]}" "${FFMPEG_BASE_ARGS[@]}" )
+	local fdkaacAllArgs=( "${fdkaacBaseArgs[@]}" )
+	fdkaacAllArgs+=( "${fdkaacEncoderArgs[@]}" )
+	if (( IS_GAPLESS )) && [ -f "${absSrcFile%/*}/${GAPLESS_ALBUM_FLAG_FILE}" ]; then fdkaacAllArgs+=( "${fdkaacGaplessArgs[@]}" ); fi
 
-	# FYI: This needs to be ahead of the ffmpegInputArgs.
-	if (( TEST_ONLY )); then ffmpegAllArgs+=( "${ffmpegTestArgs[@]}" ); fi
+	local tagArgs=()
+	createMetadataTagArgs
+	tagArgs=( "${____[@]}" )
 
-	ffmpegAllArgs+=( "${ffmpegInputArgs[@]}" )
+	log "${TASK_LEVEL}" "Encoding WAV -> AAC"
+	logRun "${FDKAAC}" "${fdkaacAllArgs[@]}" "${tagArgs[@]}" -o "${absTargetFile}" "${ABS_TMP_WAV_FILE}"
 
-	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
-		ffmpegAllArgs+=( "${ffmpegMetadataArgs[@]}" )
-	fi
+	((NESTING_LEVEL--))
+}
 
-	ffmpegAllArgs+=( "${ffmpegAudioArgs[@]}" )
+# ----------------------------------------------------------------------------
+function createMetadataTagArgs()
+{
+	((NESTING_LEVEL++))
 
-	if (( FIX_METADATA || FIX_SYNC2 )); then
-		ffmpegAllArgs+=( "${ABS_TMP_AAC_FILE}" )
-	else
-		ffmpegAllArgs+=( "${absTargetFile}" )
-	fi
+	local tagArgs=()
 
-	if [ -f "${ATOMICPARSLEY}" ]; then
-		if (( $(hasEmbeddedCoverart "${absSrcFile}") )); then
-			# Export files from video stream. Names will be <name>00001, <name>00002, <name>00010, ...
-			ffmpegAllArgs+=( "${ffmpegCoverartArgs[@]}" "${ABS_TMP_COVERART_FILE}%05d" )
+	log "${SUBTASK_LEVEL}" "Creating --tag arguments for FDKAAC..."
+	while read -r -u3 metadataLine; do
+		# FYI: title-tag could be "TITLE" or "Title". Lowercase for comparison.
+		# In Bash4 one could use ${someVariable,,}
+		local metadataLowercaseTag
+		metadataLowercaseTag=$("${TR}" '[:upper:]' '[:lower:]' <<< "${metadataLine%%=*}")
+
+		local metadataValue
+		metadataValue="${metadataLine##*=}"
+
+		local hasMapping=0
+		for mapping in "${TAG_MAPPINGS[@]}"; do
+			local mapableLowercaseTag
+			mapableLowercaseTag=$("${TR}" '[:upper:]' '[:lower:]' <<< "${mapping%%:*}")
+			if [ "${metadataLowercaseTag}" == "${mapableLowercaseTag}" ]; then
+				hasMapping=1
+				tagArgs+=( "--tag" "${mapping##*:}:${metadataValue}" )
+				log "${DETAILS_LEVEL}" "Mapping ${metadataLine} -> --tag ${mapping##*:}:${metadataValue}"
+				break
+			fi
+		done
+		if (( hasMapping == 0 )); then
+			# TODO - this should be output to a summary or something.
+			logWarn "Mapping for FLAC tag '${metadataLowercaseTag}' not found - tag will be skipped."
 		fi
-	fi
+	done 3< <("${CAT}" "${ABS_TMP_METADATA_FILE}" )
 
-	log "-----------------------------------------------------------------------" 2
-	log "Transcoding '${absSrcFile}'..." 1
-	logRun "${FFMPEG}" "${ffmpegAllArgs[@]}" 3
-	log "Done." 3
+	____=( "${tagArgs[@]}" )
 
-	if (( FIX_METADATA || FIX_SYNC2 )); then
-		if (( FIX_METADATA )); then fixMetadata; fi
-		if (( FIX_SYNC2 )); then fixSync2; fi
-		addMetadata "${absTargetFile}"
-		log "Deleting temporary AAC file..." 2
-		removeAbsFile "${ABS_TMP_AAC_FILE}"
-		log "Done." 3
-	fi
+	((NESTING_LEVEL--))
+
+	return 0
+}
+
+# ----------------------------------------------------------------------------
+function processTemporaryPlaylists()
+{
+	log "${FILE_LEVEL}" "Creating playlists..."
+	while read -d '' -r -u3 absTmpPlaylistFile; do
+		createPlaylist "${absTmpPlaylistFile}"
+	done 3< <("${FIND}" "${ABS_TARGET_ROOT_DIR}" -type f -name \*.m3u.tmp -print0)
+}
+
+# ----------------------------------------------------------------------------
+function processSrcFile()
+{
+	local absSrcFile="$1"
+	local absTargetFile="$2"
+
+	exportMetadata "${absSrcFile}"
+
+	if (( FIX_SYNC2 )); then fixSync2; fi
+
+	doWAV "${absSrcFile}"
+
+	doAAC "${absSrcFile}" "${absTargetFile}"
+
+	removeAbsFile "${SUBTASK_LEVEL}" "${ABS_TMP_WAV_FILE}" "Deleting WAV file..."
+
+	if (( HAS_ATOMICPARSLEY )); then processCoverart "${absSrcFile}" "${absTargetFile}"; fi
 
 	if (( CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
-		addFileToPlaylist "${absTargetFile}" "${absTargetRootDir}"
+		# Target file relative to root target dir.
+		# ( /a/b/c/targetdir/x/y/z/aa.m4a -> x/y/z/aa.m4a )
+		addFileToTmpPlaylist "${absTargetFile#${ABS_TARGET_ROOT_DIR}/}"
 	fi
 
-	if (( FIX_METADATA || FIX_SYNC2 || CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
-		log "Deleting temporary metadata file..." 2
-		removeAbsFile "${ABS_TMP_METADATA_FILE}"
-		log "Done." 3
-	fi
-
-	if [ -f "${ATOMICPARSLEY}" ]; then processCoverart "${absSrcFile}" "${absTargetFile}"; fi
+	removeAbsFile "${SUBTASK_LEVEL}" "${ABS_TMP_METADATA_FILE}" "Deleting exported metadata file..."
 }
 
 # ----------------------------------------------------------------------------
 function showJobSummary()
 {
-	local absSrcRootDir="$1"
-	local absTargetRootDir="$2"
-
 	local playlistType="False"
 	if (( CREATE_UNIX_PLAYLIST )); then playlistType="With '/' separators"; fi
 	if (( CREATE_DOS_PLAYLIST )); then playlistType="With '\\' separators"; fi
 
 	local params=(
-			"${absSrcRootDir}"
-			"${ENCODING_PARAMS[*]}"
-			"$( (( FIX_METADATA )) && echo "True" || echo "False" )"
+			"${ABS_SRC_ROOT_DIR}"
+			"${ENCODING_ARGS[*]}"
 			"$( (( FIX_SYNC2 )) && echo "True" || echo "False" )"
+			"$( (( IS_GAPLESS )) && echo "True" || echo "False" )"
 			"${playlistType}"
 			"$( (( RESIZE_COVER )) && echo "True" || echo "False" )"
 			"$( (( TEST_ONLY )) && echo "True" || echo "False" )"
-			"${absTargetRootDir}")
+			"${ABS_TARGET_ROOT_DIR}")
 
 	printf "
 -----------------------------------------------------------------------
@@ -490,8 +737,8 @@ I would transcode all *.flac files in the source directory to AAC.
 
 Source directory   : '%s'
 Encoding parameters: '%s'
-Fix metadata       : %s
 Fix SYNC2          : %s
+Gapless playback   : %s
 Create playlist    : %s
 Resize cover art   : %s
 Only 1s            : %s
@@ -503,88 +750,122 @@ Target directory   : '%s'
 # ----------------------------------------------------------------------------
 function run()
 {
-	local absSrcRootDir="$1"
-	local absTargetRootDir="$2"
-
-	if [ ! -f "${ATOMICPARSLEY}" ]; then
-		log "AtomicParsley not found. Cover art will not be processed." 0
+	if (( HAS_ATOMICPARSLEY == 0 )); then
+		logWarn "AtomicParsley not found. Cover art will not be processed."
 	fi
 
 	if (( JOB_SUMMARY )); then
-		showJobSummary "${absSrcRootDir}" "${absTargetRootDir}"
-		exit
+		showJobSummary
+		exit 0
 	fi
 
 	while read -d '' -r -u3 absSrcFile; do
-		local absTargetFile="${absSrcFile/${absSrcRootDir}/${absTargetRootDir}}"
+		local absTargetFile="${absSrcFile/${ABS_SRC_ROOT_DIR}/${ABS_TARGET_ROOT_DIR}}"
 		absTargetFile="${absTargetFile/.flac/.m4a}"
 
 		if [ ! -d "${absTargetFile%/*}" ]; then
-			log "-----------------------------------------------------------------------" 2
-			log "Creating directory..." 2
-			logRun "${MKDIR}" -p "${absTargetFile%/*}" 3
-			log "Done." 3
+			log "${TASK_LEVEL}" "-----------------------------------------------------------------------"
+			createDirectory "${TASK_LEVEL}" "${absTargetFile%/*}"
 		fi
 
-		doAAC "${absSrcFile}" "${absTargetFile}" "${absTargetRootDir}"
-	done 3< <("${FIND}" "${absSrcRootDir}" -type f -name \*.flac -print0 | "${SORT}" -z)
+		log "${TASK_LEVEL}" "-----------------------------------------------------------------------"
+		log "${FILE_LEVEL}" "Processing '${absSrcFile}'..."
+		processSrcFile "${absSrcFile}" "${absTargetFile}"
+	done 3< <("${FIND}" "${ABS_SRC_ROOT_DIR}" -type f -name \*.flac -print0 | "${SORT}" -z)
 
-	createPlaylists "${absTargetRootDir}"
+	if (( CREATE_UNIX_PLAYLIST || CREATE_DOS_PLAYLIST )); then
+		log "${TASK_LEVEL}" "-----------------------------------------------------------------------"
+		processTemporaryPlaylists
+		log "${TASK_LEVEL}" "-----------------------------------------------------------------------"
+	fi
+
+	log "${FILE_LEVEL}" "All done."
 }
 
-# ----------------------------------------------------------------------------
-# ----------------------------------------------------------------------------
-# ----------------------------------------------------------------------------
-PROGRAM=$(${BASENAME} "$0")
+function handleError() {
+  local lineNumber="$1"
+
+  echo "Exiting due to an error near line ${lineNumber}."
+  exit 1
+}
+
+#############################################################################
+PROGRAM="${0##*/}"
 
 VERBOSITY=0
-ENCODING_PARAMS=( "${CBR[@]}" )
-FIX_METADATA=0
+ENCODING_ARGS=( "${VBR[@]}" )
 FIX_SYNC2=0
+IS_GAPLESS=0
 CREATE_UNIX_PLAYLIST=0
 CREATE_DOS_PLAYLIST=0
 RESIZE_COVER=0
 JOB_SUMMARY=0
 TEST_ONLY=0
 
-while getopts ":vb:mtpqjrx" optname; do
+NESTING_LEVEL=0
+
+ERROR_LEVEL=0
+FILE_LEVEL=1
+TASK_LEVEL=2
+SUBTASK_LEVEL=3
+DETAILS_LEVEL=4
+COMMAND_LEVEL=5
+
+ABS_TMP_WAV_FILE="${ABS_TMP_DIR}/audiofile.wav"
+ABS_TMP_METADATA_FILE="${ABS_TMP_DIR}/metadata"
+ABS_TMP_COVERART_FILE="${ABS_TMP_DIR}/coverart"
+
+RED='\033[0;31m'
+LIGHTRED='\033[1;31m'
+NOCOLOR='\033[0m'
+
+trap 'handleError ${LINENO}' ERR
+
+HAS_ATOMICPARSLEY=0
+if [ -f "${ATOMICPARSLEY}" ]; then HAS_ATOMICPARSLEY=1; fi
+
+while getopts ":vb:tgpqjrx" optname; do
 	case "$optname" in
 	"v")
 		(( VERBOSITY++ ))
 		;;
 	"b")
-		if [ "$OPTARG" == "vbr" ]; then
-			ENCODING_PARAMS=( "${VBR[@]}" )
+		if [ "$OPTARG" == "cbr" ]; then
+			ENCODING_ARGS=( "${CBR[@]}" )
 		elif [ "$OPTARG" != "cbr" ] && [ "$OPTARG" != 'vbr' ]; then
-			log "Invalid parameter ${OPTARG}" 0 >&2
+			logError "Invalid parameter ${OPTARG}"
 			exit 1
 		fi
-		;;
-	"m")
-		FIX_METADATA=1
 		;;
 	"t")
 		FIX_SYNC2=1
 		;;
+	"g")
+		if (( HAS_ATOMICPARSLEY )); then
+			IS_GAPLESS=1
+		else
+			logError "Cannot use -g without AtomicParsley"
+		fi
+		;;
 	"p")
 		CREATE_UNIX_PLAYLIST=1
 		if (( CREATE_UNIX_PLAYLIST && CREATE_DOS_PLAYLIST )); then
-			log "Cannot use -p together with -q" 0 >&2
+			logError "Cannot use -p together with -q"
 			exit 1
 		fi
 		;;
 	"q")
 		CREATE_DOS_PLAYLIST=1
 		if (( CREATE_DOS_PLAYLIST && CREATE_UNIX_PLAYLIST )); then
-			log "Cannot use -q together with -p" 0 >&2
+			logError "Cannot use -q together with -p"
 			exit 1
 		fi
 		;;
 	"r")
-		if [ -f "${ATOMICPARSLEY}" ]; then
+		if (( HAS_ATOMICPARSLEY )); then
 			RESIZE_COVER=1
 		else
-			log "Cannot use -r without AtomicParsley" 0 >&2
+			logError "Cannot use -r without AtomicParsley"
 		fi
 		;;
 	"j")
@@ -594,11 +875,11 @@ while getopts ":vb:mtpqjrx" optname; do
 		TEST_ONLY=1
 		;;
 	"?")
-		log "Invalid option: -$OPTARG" 0 >&2
+		logError "Invalid option: -$OPTARG"
 		exit 1
 		;;
 	":")
-		log "Option -$OPTARG requires an argument." 0 >&2
+		logError "Option -$OPTARG requires an argument."
 		exit 1
 		;;
 	esac
@@ -613,26 +894,23 @@ fi
 
 # http://www.network-theory.co.uk/docs/bashref/ShellParameterExpansion.html
 if [ -d "${ABS_CURRENT_DIR}/${1}" ]; then
-	absSrcRootDir="${ABS_CURRENT_DIR}/${1%/}"
+	ABS_SRC_ROOT_DIR="${ABS_CURRENT_DIR}/${1%/}"
 elif [ -d "${1}" ]; then
-	absSrcRootDir="${1%/}"
+	ABS_SRC_ROOT_DIR="${1%/}"
 else
-	log "Invalid srcdir: '${1}'" 0 >&2
+	logError "Invalid srcdir: '${1}'"
 	exit 1
 fi
 
 if [ -d "${ABS_CURRENT_DIR}/${2}" ]; then
-	absTargetRootDir="${ABS_CURRENT_DIR}/${2%/}"
+	ABS_TARGET_ROOT_DIR="${ABS_CURRENT_DIR}/${2%/}"
 elif [ -d "${2}" ]; then
-	absTargetRootDir="${2%/}"
+	ABS_TARGET_ROOT_DIR="${2%/}"
 else
-	log "Invalid targetdir: '${2}'" 0 >&2
+	logError "Invalid targetdir: '${2}'"
 	exit 1
 fi
 
-run "${absSrcRootDir}" "${absTargetRootDir}"
-
-log "-----------------------------------------------------------------------" 2
-log "All done." 1
+run
 
 # Whenever you think something like "Why it's an one-liner, I'll put it in a file", don't do it and use python or whatever instead!
